@@ -14,25 +14,72 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1-mesa-dev libxcb1-dev libxcb-icccm4-dev \
+            libxcb-keysyms1-dev libxcb-render0-dev libxcb-shape0-dev \
+            libxcb-xfixes0-dev libxcb-xkb-dev libxkbcommon-dev libxkbcommon-x11-dev
+
+      - name: Build
+        run: cargo xtask bundle hardwave-bridge --release
+
+      - name: Package
+        run: |
+          cd target/bundled
+          tar -czvf hardwave-bridge-linux-x64.tar.gz hardwave-bridge.vst3 hardwave-bridge.clap
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: hardwave-bridge-linux-x64
+          path: target/bundled/hardwave-bridge-linux-x64.tar.gz
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Build
+        run: cargo xtask bundle hardwave-bridge --release
+
+      - name: Package
+        run: |
+          cd target/bundled
+          Compress-Archive -Path "hardwave-bridge.vst3", "hardwave-bridge.clap" -DestinationPath "hardwave-bridge-windows-x64.zip"
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: hardwave-bridge-windows-x64
+          path: target/bundled/hardwave-bridge-windows-x64.zip
+
+  build-macos:
+    runs-on: macos-latest
     strategy:
       matrix:
         include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            artifact: hardwave-bridge-linux-x64
-          - os: macos-latest
-            target: x86_64-apple-darwin
+          - target: x86_64-apple-darwin
             artifact: hardwave-bridge-macos-x64
-          - os: macos-latest
-            target: aarch64-apple-darwin
+          - target: aarch64-apple-darwin
             artifact: hardwave-bridge-macos-arm64
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            artifact: hardwave-bridge-windows-x64
-
-    runs-on: ${{ matrix.os }}
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -42,37 +89,31 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install Linux dependencies
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libgl1-mesa-dev libxcb1-dev libxcb-icccm4-dev \
-            libxcb-keysyms1-dev libxcb-render0-dev libxcb-shape0-dev \
-            libxcb-xfixes0-dev libxcb-xkb-dev libxkbcommon-dev libxkbcommon-x11-dev
-
-      - name: Build plugin
+      - name: Build
         run: cargo xtask bundle hardwave-bridge --release --target ${{ matrix.target }}
 
-      - name: Package artifacts (Unix)
-        if: matrix.os != 'windows-latest'
+      - name: Package
         run: |
           cd target/bundled
-          zip -r ${{ matrix.artifact }}.zip hardwave-bridge.vst3 hardwave-bridge.clap
+          # Use ditto to preserve macOS bundle structure and metadata
+          ditto -c -k --keepParent hardwave-bridge.vst3 vst3.zip
+          ditto -c -k --keepParent hardwave-bridge.clap clap.zip
+          # Combine into final archive
+          mkdir -p package
+          cd package
+          unzip ../vst3.zip
+          unzip ../clap.zip
+          cd ..
+          ditto -c -k package ${{ matrix.artifact }}.zip
 
-      - name: Package artifacts (Windows)
-        if: matrix.os == 'windows-latest'
-        run: |
-          cd target/bundled
-          Compress-Archive -Path "hardwave-bridge.vst3", "hardwave-bridge.clap" -DestinationPath "${{ matrix.artifact }}.zip"
-
-      - name: Upload artifact
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
           path: target/bundled/${{ matrix.artifact }}.zip
 
   release:
-    needs: build
+    needs: [build-linux, build-windows, build-macos]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -85,6 +126,9 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: artifacts
+
+      - name: List artifacts
+        run: find artifacts -type f
 
       - name: Get version
         id: version
@@ -104,24 +148,47 @@ jobs:
           prerelease: false
           generate_release_notes: true
           files: |
-            artifacts/**/*.zip
+            artifacts/hardwave-bridge-linux-x64/*.tar.gz
+            artifacts/hardwave-bridge-windows-x64/*.zip
+            artifacts/hardwave-bridge-macos-x64/*.zip
+            artifacts/hardwave-bridge-macos-arm64/*.zip
           body: |
             ## Hardwave Bridge ${{ steps.version.outputs.version }}
 
             VST3/CLAP plugin that streams audio from your DAW to Hardwave Suite for real-time analysis.
 
+            ### Downloads
+
+            | Platform | File |
+            |----------|------|
+            | Windows x64 | `hardwave-bridge-windows-x64.zip` |
+            | macOS Intel | `hardwave-bridge-macos-x64.zip` |
+            | macOS Apple Silicon | `hardwave-bridge-macos-arm64.zip` |
+            | Linux x64 | `hardwave-bridge-linux-x64.tar.gz` |
+
             ### Installation
 
-            1. Download the zip for your platform
-            2. Extract the contents
-            3. Copy the `.vst3` folder and `.clap` file to your plugin folder:
-               - **Windows:** `C:\Program Files\Common Files\VST3` and `C:\Program Files\Common Files\CLAP`
-               - **macOS:** `~/Library/Audio/Plug-Ins/VST3` and `~/Library/Audio/Plug-Ins/CLAP`
-               - **Linux:** `~/.vst3` and `~/.clap`
-            4. Rescan plugins in your DAW
-            5. Add "Hardwave Bridge" to your master channel
+            **Windows:**
+            1. Extract the zip
+            2. Copy `hardwave-bridge.vst3` folder to `C:\Program Files\Common Files\VST3\`
+            3. Copy `hardwave-bridge.clap` to `C:\Program Files\Common Files\CLAP\`
 
-            ### Requirements
+            **macOS:**
+            1. Extract the zip
+            2. Copy `hardwave-bridge.vst3` to `~/Library/Audio/Plug-Ins/VST3/`
+            3. Copy `hardwave-bridge.clap` to `~/Library/Audio/Plug-Ins/CLAP/`
+            4. If blocked by Gatekeeper, right-click > Open, or run:
+               ```
+               xattr -cr ~/Library/Audio/Plug-Ins/VST3/hardwave-bridge.vst3
+               xattr -cr ~/Library/Audio/Plug-Ins/CLAP/hardwave-bridge.clap
+               ```
 
-            - Hardwave Suite desktop app running with VST mode enabled
-            - DAW with VST3 or CLAP support
+            **Linux:**
+            1. Extract: `tar -xzf hardwave-bridge-linux-x64.tar.gz`
+            2. Copy to `~/.vst3/` and `~/.clap/`
+
+            ### Usage
+
+            1. Open Hardwave Suite and select **VST** mode in the Analyser
+            2. Add **Hardwave Bridge** to your DAW's master channel
+            3. Connection is automatic on port 9847
