@@ -1,0 +1,127 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag (e.g., v0.1.0)'
+        required: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: hardwave-bridge-linux-x64
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact: hardwave-bridge-macos-x64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact: hardwave-bridge-macos-arm64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: hardwave-bridge-windows-x64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-action@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Linux dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1-mesa-dev libxcb1-dev libxcb-icccm4-dev \
+            libxcb-keysyms1-dev libxcb-render0-dev libxcb-shape0-dev \
+            libxcb-xfixes0-dev libxcb-xkb-dev libxkbcommon-dev libxkbcommon-x11-dev
+
+      - name: Build plugin
+        run: cargo xtask bundle hardwave-bridge --release --target ${{ matrix.target }}
+
+      - name: Package artifacts (Unix)
+        if: matrix.os != 'windows-latest'
+        run: |
+          cd target/bundled
+          zip -r ${{ matrix.artifact }}.zip hardwave-bridge.vst3 hardwave-bridge.clap
+
+      - name: Package artifacts (Windows)
+        if: matrix.os == 'windows-latest'
+        run: |
+          cd target/bundled
+          Compress-Archive -Path "hardwave-bridge.vst3", "hardwave-bridge.clap" -DestinationPath "${{ matrix.artifact }}.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: target/bundled/${{ matrix.artifact }}.zip
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Get version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          name: Hardwave Bridge ${{ steps.version.outputs.version }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: |
+            artifacts/**/*.zip
+          body: |
+            ## Hardwave Bridge ${{ steps.version.outputs.version }}
+
+            VST3/CLAP plugin that streams audio from your DAW to Hardwave Suite for real-time analysis.
+
+            ### Installation
+
+            1. Download the zip for your platform
+            2. Extract the contents
+            3. Copy the `.vst3` folder and `.clap` file to your plugin folder:
+               - **Windows:** `C:\Program Files\Common Files\VST3` and `C:\Program Files\Common Files\CLAP`
+               - **macOS:** `~/Library/Audio/Plug-Ins/VST3` and `~/Library/Audio/Plug-Ins/CLAP`
+               - **Linux:** `~/.vst3` and `~/.clap`
+            4. Rescan plugins in your DAW
+            5. Add "Hardwave Bridge" to your master channel
+
+            ### Requirements
+
+            - Hardwave Suite desktop app running with VST mode enabled
+            - DAW with VST3 or CLAP support
