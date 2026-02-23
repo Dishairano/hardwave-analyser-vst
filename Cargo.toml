@@ -13,13 +13,10 @@ description = "VST3/CLAP plugin that streams audio to Hardwave Suite for real-ti
 crate-type = ["cdylib"]
 
 [dependencies]
-nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", features = ["assert_process_allocs"] }
+nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git" }
+
 # Webview editor (replaces vizia)
 wry = { version = "0.46", optional = true }
-
-# GTK for Linux webview event loop
-[target.'cfg(target_os = "linux")'.dependencies]
-gtk = { version = "0.18", optional = true }
 
 # WebSocket client
 tungstenite = { version = "0.21", default-features = false, features = ["handshake"] }
@@ -42,6 +39,10 @@ parking_lot = "0.12"
 
 # Atomic float operations
 atomic_float = "1"
+
+# GTK for Linux webview event loop
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = { version = "0.18", optional = true }
 
 [features]
 default = ["gui"]
