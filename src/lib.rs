@@ -2,12 +2,18 @@
 //!
 //! This plugin captures audio from the DAW and streams FFT data via WebSocket
 //! to the Hardwave Suite desktop application for real-time analysis.
+//! When built with the `gui` feature, it also embeds a wry webview that loads
+//! the Hardwave Analyser from hardwave.studio inside the DAW plugin window.
 
+mod auth;
+#[cfg(feature = "gui")]
+mod editor;
 mod fft;
 mod params;
 mod protocol;
 mod websocket;
 
+use crossbeam_channel::{bounded, Sender};
 use nih_plug::prelude::*;
 use std::sync::Arc;
 use std::time::Instant;
@@ -21,8 +27,15 @@ use websocket::WebSocketClient;
 pub struct HardwaveBridge {
     params: Arc<HardwaveBridgeParams>,
 
-    /// WebSocket client for streaming
+    /// WebSocket client for streaming to the desktop app
     ws_client: WebSocketClient,
+
+    /// Sender for the editor webview (gui feature)
+    editor_packet_tx: Sender<AudioPacket>,
+
+    /// Editor instance (created once, reused)
+    #[cfg(feature = "gui")]
+    editor_instance: Option<editor::HardwaveBridgeEditor>,
 
     /// FFT processor for left channel
     fft_left: FftProcessor,
@@ -54,9 +67,16 @@ pub struct HardwaveBridge {
 
 impl Default for HardwaveBridge {
     fn default() -> Self {
+        let (editor_packet_tx, editor_packet_rx) = bounded::<AudioPacket>(32);
+
         Self {
             params: Arc::new(HardwaveBridgeParams::default()),
             ws_client: WebSocketClient::new(),
+            editor_packet_tx,
+            #[cfg(feature = "gui")]
+            editor_instance: {
+                Some(editor::HardwaveBridgeEditor::new(editor_packet_rx))
+            },
             fft_left: FftProcessor::new(),
             fft_right: FftProcessor::new(),
             buffer_left: Vec::with_capacity(FFT_SIZE),
@@ -102,6 +122,19 @@ impl Plugin for HardwaveBridge {
 
     fn params(&self) -> Arc<dyn Params> {
         self.params.clone()
+    }
+
+    fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
+        #[cfg(feature = "gui")]
+        {
+            self.editor_instance
+                .take()
+                .map(|e| Box::new(e) as Box<dyn Editor>)
+        }
+        #[cfg(not(feature = "gui"))]
+        {
+            None
+        }
     }
 
     fn initialize(
@@ -210,7 +243,11 @@ impl HardwaveBridge {
             right_rms,
         );
 
-        self.ws_client.send(packet);
+        // Send to WebSocket (desktop app)
+        self.ws_client.send(packet.clone());
+
+        // Send to editor webview (non-blocking, drops if full)
+        let _ = self.editor_packet_tx.try_send(packet);
     }
 }
 

@@ -15,7 +15,7 @@ env:
 
 jobs:
   build-linux:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -28,7 +28,9 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgl1-mesa-dev libxcb1-dev libxcb-icccm4-dev \
+          sudo apt-get install -y pkg-config libglib2.0-dev libgtk-3-dev \
+            libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev \
+            libgl1-mesa-dev libxcb1-dev libxcb-icccm4-dev \
             libxcb-keysyms1-dev libxcb-render0-dev libxcb-shape0-dev \
             libxcb-xfixes0-dev libxcb-xkb-dev libxkbcommon-dev libxkbcommon-x11-dev
 
@@ -47,23 +49,30 @@ jobs:
           path: target/bundled/hardwave-bridge-linux-x64.tar.gz
 
   build-windows:
-    runs-on: windows-latest
+    runs-on: [self-hosted, linux, x64]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Rust
+      - name: Install Rust + Windows target
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-pc-windows-msvc
+          targets: x86_64-pc-windows-gnu
+
+      - name: Install cross-compilation tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-mingw-w64-x86-64
 
       - name: Build
-        run: cargo xtask bundle hardwave-bridge --release
+        env:
+          CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: x86_64-w64-mingw32-gcc
+        run: cargo xtask bundle hardwave-bridge --release --target x86_64-pc-windows-gnu
 
       - name: Package
         run: |
           cd target/bundled
-          Compress-Archive -Path "hardwave-bridge.vst3", "hardwave-bridge.clap" -DestinationPath "hardwave-bridge-windows-x64.zip"
+          zip -r hardwave-bridge-windows-x64.zip hardwave-bridge.vst3 hardwave-bridge.clap
 
       - name: Upload
         uses: actions/upload-artifact@v4
@@ -71,50 +80,9 @@ jobs:
           name: hardwave-bridge-windows-x64
           path: target/bundled/hardwave-bridge-windows-x64.zip
 
-  build-macos:
-    runs-on: macos-latest
-    strategy:
-      matrix:
-        include:
-          - target: x86_64-apple-darwin
-            artifact: hardwave-bridge-macos-x64
-          - target: aarch64-apple-darwin
-            artifact: hardwave-bridge-macos-arm64
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
-      - name: Build
-        run: cargo xtask bundle hardwave-bridge --release --target ${{ matrix.target }}
-
-      - name: Package
-        run: |
-          cd target/bundled
-          # Use ditto to preserve macOS bundle structure and metadata
-          ditto -c -k --keepParent hardwave-bridge.vst3 vst3.zip
-          ditto -c -k --keepParent hardwave-bridge.clap clap.zip
-          # Combine into final archive
-          mkdir -p package
-          cd package
-          unzip ../vst3.zip
-          unzip ../clap.zip
-          cd ..
-          ditto -c -k package ${{ matrix.artifact }}.zip
-
-      - name: Upload
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.artifact }}
-          path: target/bundled/${{ matrix.artifact }}.zip
-
   release:
-    needs: [build-linux, build-windows, build-macos]
-    runs-on: ubuntu-latest
+    needs: [build-linux, build-windows]
+    runs-on: [self-hosted, linux, x64]
     permissions:
       contents: write
 
@@ -143,28 +111,26 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           tag_name: ${{ steps.version.outputs.version }}
-          name: Hardwave Bridge ${{ steps.version.outputs.version }}
+          name: Hardwave Analyser VST ${{ steps.version.outputs.version }}
           draft: false
           prerelease: false
           generate_release_notes: true
           files: |
             artifacts/hardwave-bridge-linux-x64/*.tar.gz
             artifacts/hardwave-bridge-windows-x64/*.zip
-            artifacts/hardwave-bridge-macos-x64/*.zip
-            artifacts/hardwave-bridge-macos-arm64/*.zip
           body: |
-            ## Hardwave Bridge ${{ steps.version.outputs.version }}
+            ## Hardwave Analyser VST ${{ steps.version.outputs.version }}
 
-            VST3/CLAP plugin that streams audio from your DAW to Hardwave Suite for real-time analysis.
+            VST3/CLAP plugin with embedded spectrum analyser — powered by Hardwave Studio.
 
             ### Downloads
 
             | Platform | File |
             |----------|------|
             | Windows x64 | `hardwave-bridge-windows-x64.zip` |
-            | macOS Intel | `hardwave-bridge-macos-x64.zip` |
-            | macOS Apple Silicon | `hardwave-bridge-macos-arm64.zip` |
             | Linux x64 | `hardwave-bridge-linux-x64.tar.gz` |
+
+            > macOS builds coming soon.
 
             ### Installation
 
@@ -173,22 +139,12 @@ jobs:
             2. Copy `hardwave-bridge.vst3` folder to `C:\Program Files\Common Files\VST3\`
             3. Copy `hardwave-bridge.clap` to `C:\Program Files\Common Files\CLAP\`
 
-            **macOS:**
-            1. Extract the zip
-            2. Copy `hardwave-bridge.vst3` to `~/Library/Audio/Plug-Ins/VST3/`
-            3. Copy `hardwave-bridge.clap` to `~/Library/Audio/Plug-Ins/CLAP/`
-            4. If blocked by Gatekeeper, right-click > Open, or run:
-               ```
-               xattr -cr ~/Library/Audio/Plug-Ins/VST3/hardwave-bridge.vst3
-               xattr -cr ~/Library/Audio/Plug-Ins/CLAP/hardwave-bridge.clap
-               ```
-
             **Linux:**
             1. Extract: `tar -xzf hardwave-bridge-linux-x64.tar.gz`
             2. Copy to `~/.vst3/` and `~/.clap/`
 
             ### Usage
 
-            1. Open Hardwave Suite and select **VST** mode in the Analyser
-            2. Add **Hardwave Bridge** to your DAW's master channel
-            3. Connection is automatic on port 9847
+            1. Add **Hardwave Bridge** to your DAW's master channel
+            2. The plugin opens an embedded analyser (requires internet + Hardwave Pro subscription)
+            3. Log in once — credentials are saved locally
