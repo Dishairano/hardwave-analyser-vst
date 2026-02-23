@@ -25,15 +25,6 @@ jobs:
         with:
           targets: x86_64-unknown-linux-gnu
 
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y pkg-config libglib2.0-dev libgtk-3-dev \
-            libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev \
-            libgl1-mesa-dev libxcb1-dev libxcb-icccm4-dev \
-            libxcb-keysyms1-dev libxcb-render0-dev libxcb-shape0-dev \
-            libxcb-xfixes0-dev libxcb-xkb-dev libxkbcommon-dev libxkbcommon-x11-dev
-
       - name: Build
         run: cargo xtask bundle hardwave-bridge --release
 
@@ -48,40 +39,8 @@ jobs:
           name: hardwave-bridge-linux-x64
           path: target/bundled/hardwave-bridge-linux-x64.tar.gz
 
-  build-windows:
-    runs-on: [self-hosted, linux, x64]
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Rust + Windows target
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-pc-windows-gnu
-
-      - name: Install cross-compilation tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-mingw-w64-x86-64
-
-      - name: Build
-        env:
-          CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: x86_64-w64-mingw32-gcc
-        run: cargo xtask bundle hardwave-bridge --release --target x86_64-pc-windows-gnu
-
-      - name: Package
-        run: |
-          cd target/bundled
-          zip -r hardwave-bridge-windows-x64.zip hardwave-bridge.vst3 hardwave-bridge.clap
-
-      - name: Upload
-        uses: actions/upload-artifact@v4
-        with:
-          name: hardwave-bridge-windows-x64
-          path: target/bundled/hardwave-bridge-windows-x64.zip
-
   release:
-    needs: [build-linux, build-windows]
+    needs: [build-linux]
     runs-on: [self-hosted, linux, x64]
     permissions:
       contents: write
@@ -117,7 +76,6 @@ jobs:
           generate_release_notes: true
           files: |
             artifacts/hardwave-bridge-linux-x64/*.tar.gz
-            artifacts/hardwave-bridge-windows-x64/*.zip
           body: |
             ## Hardwave Analyser VST ${{ steps.version.outputs.version }}
 
@@ -127,17 +85,11 @@ jobs:
 
             | Platform | File |
             |----------|------|
-            | Windows x64 | `hardwave-bridge-windows-x64.zip` |
             | Linux x64 | `hardwave-bridge-linux-x64.tar.gz` |
 
-            > macOS builds coming soon.
+            > Windows and macOS builds coming soon.
 
             ### Installation
-
-            **Windows:**
-            1. Extract the zip
-            2. Copy `hardwave-bridge.vst3` folder to `C:\Program Files\Common Files\VST3\`
-            3. Copy `hardwave-bridge.clap` to `C:\Program Files\Common Files\CLAP\`
 
             **Linux:**
             1. Extract: `tar -xzf hardwave-bridge-linux-x64.tar.gz`
