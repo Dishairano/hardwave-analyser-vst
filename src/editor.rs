@@ -93,6 +93,38 @@ fn ensure_webview2() {
     }
 }
 
+/// Pump all pending Win32 messages on the current thread.
+/// Required for WebView2 to process events and render content.
+#[cfg(target_os = "windows")]
+fn pump_win32_messages() {
+    #[repr(C)]
+    struct MSG {
+        hwnd: *mut std::ffi::c_void,
+        message: u32,
+        w_param: usize,
+        l_param: isize,
+        time: u32,
+        pt_x: i32,
+        pt_y: i32,
+    }
+
+    extern "system" {
+        fn PeekMessageW(msg: *mut MSG, hwnd: *mut std::ffi::c_void, min: u32, max: u32, remove: u32) -> i32;
+        fn TranslateMessage(msg: *const MSG) -> i32;
+        fn DispatchMessageW(msg: *const MSG) -> isize;
+    }
+
+    const PM_REMOVE: u32 = 0x0001;
+
+    unsafe {
+        let mut msg = std::mem::zeroed::<MSG>();
+        while PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) != 0 {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+}
+
 /// Default editor size.
 const EDITOR_WIDTH: u32 = 900;
 const EDITOR_HEIGHT: u32 = 640;
@@ -305,6 +337,12 @@ impl Editor for HardwaveBridgeEditor {
                             while gtk::events_pending() {
                                 gtk::main_iteration_do(false);
                             }
+                        }
+
+                        // Pump Windows messages so WebView2 can process events.
+                        #[cfg(target_os = "windows")]
+                        {
+                            pump_win32_messages();
                         }
 
                         thread::sleep(Duration::from_millis(16)); // ~60 Hz
