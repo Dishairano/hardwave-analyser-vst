@@ -67,7 +67,7 @@ pub struct HardwaveBridge {
 
 impl Default for HardwaveBridge {
     fn default() -> Self {
-        let (editor_packet_tx, editor_packet_rx) = bounded::<AudioPacket>(32);
+        let (editor_packet_tx, _editor_packet_rx) = bounded::<AudioPacket>(32);
 
         Self {
             params: Arc::new(HardwaveBridgeParams::default()),
@@ -75,7 +75,7 @@ impl Default for HardwaveBridge {
             editor_packet_tx,
             #[cfg(feature = "gui")]
             editor_instance: {
-                Some(editor::HardwaveBridgeEditor::new(editor_packet_rx))
+                Some(editor::HardwaveBridgeEditor::new(_editor_packet_rx))
             },
             fft_left: FftProcessor::new(),
             fft_right: FftProcessor::new(),

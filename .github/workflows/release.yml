@@ -50,16 +50,8 @@ jobs:
         with:
           targets: x86_64-pc-windows-gnu
 
-      - name: Build
-        run: cargo xtask bundle hardwave-bridge --release --target x86_64-pc-windows-gnu
-
-      - name: Bundle WebView2Loader.dll
-        run: |
-          # Find and copy WebView2Loader.dll into the VST3 bundle
-          WV2_DLL=$(find $HOME/.cargo/registry/src -name "WebView2Loader.dll" -path "*/x64/*" | head -1)
-          if [ -n "$WV2_DLL" ]; then
-            cp "$WV2_DLL" target/bundled/hardwave-bridge.vst3/Contents/x86_64-win/
-          fi
+      - name: Build (no GUI - headless bridge for Windows)
+        run: cargo xtask bundle hardwave-bridge --release --target x86_64-pc-windows-gnu --no-default-features
 
       - name: Package
         run: |
@@ -113,16 +105,16 @@ jobs:
           body: |
             ## Hardwave Analyser VST ${{ steps.version.outputs.version }}
 
-            VST3/CLAP plugin with embedded spectrum analyser — powered by Hardwave Studio.
+            VST3/CLAP audio bridge plugin — powered by Hardwave Studio.
 
             ### Downloads
 
-            | Platform | File |
-            |----------|------|
-            | Windows x64 | `hardwave-bridge-windows-x64.zip` |
-            | Linux x64 | `hardwave-bridge-linux-x64.tar.gz` |
+            | Platform | File | Features |
+            |----------|------|----------|
+            | Linux x64 | `hardwave-bridge-linux-x64.tar.gz` | Bridge + Embedded Analyser GUI |
+            | Windows x64 | `hardwave-bridge-windows-x64.zip` | Bridge (headless) |
 
-            > macOS builds coming soon.
+            > Windows GUI support and macOS builds coming soon.
 
             ### Installation
 
@@ -137,6 +129,5 @@ jobs:
 
             ### Usage
 
-            1. Add **Hardwave Bridge** to your DAW's master channel
-            2. The plugin opens an embedded analyser (requires internet + Hardwave Pro subscription)
-            3. Log in once — credentials are saved locally
+            - **Linux:** The plugin opens an embedded analyser (requires internet + Hardwave Pro subscription). Log in once — credentials are saved locally.
+            - **Windows:** Headless audio bridge. Use the web analyser at hardwavestudios.com for the full GUI experience.
