@@ -21,6 +21,78 @@ use wry::raw_window_handle as rwh06;
 use crate::auth;
 use crate::protocol::AudioPacket;
 
+// ---------------------------------------------------------------------------
+// WebView2 auto-install (Windows only)
+// ---------------------------------------------------------------------------
+
+/// Ensures the WebView2 Evergreen Runtime is installed. If missing, downloads
+/// the ~2 MB bootstrapper from Microsoft and runs it silently.
+#[cfg(target_os = "windows")]
+fn ensure_webview2() {
+    use std::process::Command;
+
+    // Check if WebView2 is already available by looking for the registry key.
+    let installed = Command::new("reg")
+        .args([
+            "query",
+            r"HKLM\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}",
+            "/v", "pv",
+        ])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    if installed {
+        return;
+    }
+
+    // Also check per-user install
+    let installed_user = Command::new("reg")
+        .args([
+            "query",
+            r"HKCU\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}",
+            "/v", "pv",
+        ])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    if installed_user {
+        return;
+    }
+
+    nih_log!("WebView2 Runtime not found — downloading bootstrapper...");
+
+    let temp_dir = std::env::temp_dir();
+    let bootstrapper_path = temp_dir.join("MicrosoftEdgeWebview2Setup.exe");
+
+    // Download the Evergreen bootstrapper (~2 MB)
+    let download = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-Command",
+            &format!(
+                "Invoke-WebRequest -Uri 'https://go.microsoft.com/fwlink/p/?LinkId=2124703' -OutFile '{}'",
+                bootstrapper_path.display()
+            ),
+        ])
+        .output();
+
+    match download {
+        Ok(output) if output.status.success() => {
+            nih_log!("Installing WebView2 Runtime silently...");
+            let _ = Command::new(&bootstrapper_path)
+                .args(["/silent", "/install"])
+                .output();
+            // Clean up
+            let _ = std::fs::remove_file(&bootstrapper_path);
+        }
+        _ => {
+            nih_log!("Failed to download WebView2 bootstrapper");
+        }
+    }
+}
+
 /// Default editor size.
 const EDITOR_WIDTH: u32 = 900;
 const EDITOR_HEIGHT: u32 = 640;
@@ -172,6 +244,9 @@ impl Editor for HardwaveBridgeEditor {
             {
                 let _ = gtk::init();
             }
+
+            #[cfg(target_os = "windows")]
+            ensure_webview2();
 
             let reconstructed = match parent_data {
                 ParentData::X11(w) => ParentWindowHandle::X11Window(w),
