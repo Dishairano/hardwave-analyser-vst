@@ -150,6 +150,9 @@ impl Plugin for HardwaveBridge {
         self.buffer_left.clear();
         self.buffer_right.clear();
 
+        // Start WebSocket client (deferred from new() to avoid blocking DAW scans)
+        self.ws_client.start();
+
         // Set initial port
         self.ws_client.set_port(self.params.port.value());
         self.last_port = self.params.port.value();

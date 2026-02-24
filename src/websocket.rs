@@ -41,28 +41,41 @@ pub struct WebSocketClient {
 }
 
 impl WebSocketClient {
-    /// Create a new WebSocket client
+    /// Create a new WebSocket client. Does NOT start the connection thread yet —
+    /// call `start()` after the plugin is initialised to avoid blocking DAW
+    /// plugin scans.
     pub fn new() -> Self {
-        let (packet_sender, packet_receiver) = bounded::<AudioPacket>(32);
+        let (packet_sender, _packet_receiver) = bounded::<AudioPacket>(32);
         let state = Arc::new(Mutex::new(ConnectionState::Disconnected));
         let shutdown = Arc::new(AtomicBool::new(false));
         let server_port = Arc::new(Mutex::new(9847u16));
-
-        let state_clone = Arc::clone(&state);
-        let shutdown_clone = Arc::clone(&shutdown);
-        let port_clone = Arc::clone(&server_port);
-
-        let thread_handle = thread::spawn(move || {
-            Self::connection_loop(packet_receiver, state_clone, shutdown_clone, port_clone);
-        });
 
         Self {
             packet_sender,
             state,
             shutdown,
-            thread_handle: Some(thread_handle),
+            thread_handle: None,
             server_port,
         }
+    }
+
+    /// Start the background connection thread. Safe to call multiple times —
+    /// only the first call spawns the thread.
+    pub fn start(&mut self) {
+        if self.thread_handle.is_some() {
+            return;
+        }
+
+        let (packet_sender, packet_receiver) = bounded::<AudioPacket>(32);
+        self.packet_sender = packet_sender;
+
+        let state_clone = Arc::clone(&self.state);
+        let shutdown_clone = Arc::clone(&self.shutdown);
+        let port_clone = Arc::clone(&self.server_port);
+
+        self.thread_handle = Some(thread::spawn(move || {
+            Self::connection_loop(packet_receiver, state_clone, shutdown_clone, port_clone);
+        }));
     }
 
     /// Update the server port
