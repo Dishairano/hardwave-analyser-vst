@@ -53,8 +53,8 @@ jobs:
       - name: Install cargo-xwin
         run: cargo install cargo-xwin --locked
 
-      - name: Build (MSVC cross-compile, no GUI)
-        run: cargo xwin build --release --target x86_64-pc-windows-msvc --no-default-features -p hardwave-bridge
+      - name: Build (MSVC cross-compile, with GUI)
+        run: cargo xwin build --release --target x86_64-pc-windows-msvc -p hardwave-bridge
 
       - name: Bundle VST3 and CLAP
         run: |
@@ -121,12 +121,12 @@ jobs:
 
             ### Downloads
 
-            | Platform | File | Features |
-            |----------|------|----------|
-            | Linux x64 | `hardwave-bridge-linux-x64.tar.gz` | Bridge + Embedded Analyser GUI |
-            | Windows x64 | `hardwave-bridge-windows-x64.zip` | Bridge (headless) |
+            | Platform | File |
+            |----------|------|
+            | Linux x64 | `hardwave-bridge-linux-x64.tar.gz` |
+            | Windows x64 | `hardwave-bridge-windows-x64.zip` |
 
-            > Windows GUI support and macOS builds coming soon.
+            > macOS builds coming soon.
 
             ### Installation
 
@@ -141,5 +141,6 @@ jobs:
 
             ### Usage
 
-            - **Linux:** The plugin opens an embedded analyser (requires internet + Hardwave Pro subscription). Log in once — credentials are saved locally.
-            - **Windows:** Headless audio bridge. Use the web analyser at hardwavestudios.com for the full GUI experience.
+            1. Add **Hardwave Bridge** to your DAW's master channel
+            2. The plugin opens an embedded analyser (requires internet + Hardwave Pro subscription)
+            3. Log in once — credentials are saved locally

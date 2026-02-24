@@ -46,7 +46,7 @@ gtk = { version = "0.18", optional = true }
 
 [features]
 default = ["gui"]
-gui = ["wry", "gtk"]
+gui = ["wry"]
 
 [profile.release]
 lto = "thin"
