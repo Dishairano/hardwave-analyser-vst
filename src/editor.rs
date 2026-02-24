@@ -257,6 +257,10 @@ impl Editor for HardwaveBridgeEditor {
 
             let ipc_auth_token = Arc::clone(&auth_token);
             let webview = wry::WebViewBuilder::new()
+                .with_bounds(wry::Rect {
+                    position: wry::dpi::LogicalPosition::new(0, 0).into(),
+                    size: wry::dpi::LogicalSize::new(EDITOR_WIDTH, EDITOR_HEIGHT).into(),
+                })
                 .with_url(&url)
                 .with_ipc_handler(move |req: wry::http::Request<String>| {
                     let msg = req.body().as_str();
