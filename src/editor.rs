@@ -168,7 +168,7 @@ impl Editor for HardwaveBridgeEditor {
         // packet injection loop. The webview must only be accessed from
         // the thread that created it (GTK requirement on Linux).
         let handle = thread::spawn(move || {
-            #[cfg(target_os = "linux")]
+            #[cfg(all(target_os = "linux", feature = "gtk"))]
             {
                 let _ = gtk::init();
             }
@@ -221,7 +221,7 @@ impl Editor for HardwaveBridgeEditor {
                             let _ = webview.evaluate_script(&js);
                         }
 
-                        #[cfg(target_os = "linux")]
+                        #[cfg(all(target_os = "linux", feature = "gtk"))]
                         {
                             while gtk::events_pending() {
                                 gtk::main_iteration_do(false);
