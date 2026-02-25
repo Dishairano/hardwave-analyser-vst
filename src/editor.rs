@@ -425,7 +425,7 @@ impl Editor for HardwaveBridgeEditor {
                                         dbg('fetch error #' + _fetchErr + ': ' + e);
                                     }}
                                 }})
-                                .finally(function() {{ setTimeout(poll, 16); }});
+                                .finally(function() {{ requestAnimationFrame(poll); }});
                         }})();
                     }}
 
