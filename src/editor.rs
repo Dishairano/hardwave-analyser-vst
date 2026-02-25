@@ -1,9 +1,10 @@
 //! Webview-based editor for Hardwave Bridge.
 //!
 //! Embeds a wry `WebView` that loads the Hardwave analyser page.
-//! On Windows, FFT data is delivered to the page via a custom protocol
-//! ("hwpacket://") that JS polls at ~60fps — this avoids cross-thread
-//! COM issues with WebView2's STA-bound ICoreWebView2::ExecuteScript.
+//! On Windows, FFT data is delivered via a local HTTP server (TcpListener
+//! on a random port) that JS polls at ~60fps. This avoids both the STA
+//! threading restriction on ICoreWebView2::ExecuteScript and the wry
+//! custom-protocol interception issues in wry 0.46.
 
 use crossbeam_channel::Receiver;
 use nih_plug::prelude::*;
@@ -11,11 +12,8 @@ use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
-#[cfg(not(target_os = "windows"))]
 use std::time::Duration;
 use wry::raw_window_handle as rwh06;
-#[cfg(target_os = "windows")]
-use wry::WebViewBuilderExtWindows;
 
 use crate::auth;
 use crate::protocol::AudioPacket;
@@ -215,6 +213,97 @@ impl HardwaveBridgeEditor {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Local HTTP packet server (Windows only)
+// ---------------------------------------------------------------------------
+
+/// Spawn a tiny HTTP server on a random loopback port that serves the latest
+/// FFT packet as JSON. JS fetches `http://127.0.0.1:{port}/` at ~60 fps.
+///
+/// The server runs until `running` is set to false (EditorHandle dropped).
+#[cfg(target_os = "windows")]
+fn start_packet_server(
+    packet_rx: Receiver<crate::protocol::AudioPacket>,
+    running: Arc<AtomicBool>,
+) -> u16 {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    let listener = match TcpListener::bind("127.0.0.1:0") {
+        Ok(l) => l,
+        Err(e) => {
+            debug_log(&format!("start_packet_server: bind failed: {}", e));
+            return 0;
+        }
+    };
+    let port = listener.local_addr().map(|a| a.port()).unwrap_or(0);
+
+    thread::spawn(move || {
+        // Shared storage for the latest packet.
+        let latest: Arc<Mutex<Option<crate::protocol::AudioPacket>>> =
+            Arc::new(Mutex::new(None));
+
+        // Drainer thread: keeps `latest` current from the crossbeam channel.
+        {
+            let latest_w = Arc::clone(&latest);
+            let running_d = Arc::clone(&running);
+            thread::spawn(move || {
+                while running_d.load(Ordering::Relaxed) {
+                    while let Ok(p) = packet_rx.try_recv() {
+                        *latest_w.lock() = Some(p);
+                    }
+                    thread::sleep(Duration::from_millis(4));
+                }
+            });
+        }
+
+        // HTTP accept loop (non-blocking so we can check `running`).
+        listener.set_nonblocking(true).ok();
+        while running.load(Ordering::Relaxed) {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let body = {
+                        let guard = latest.lock();
+                        match guard.as_ref() {
+                            Some(p) => serde_json::to_string(p)
+                                .unwrap_or_else(|_| "null".to_string()),
+                            None => "null".to_string(),
+                        }
+                    };
+                    // Drain the incoming HTTP request bytes (ignore them).
+                    stream.set_read_timeout(Some(Duration::from_millis(10))).ok();
+                    let mut buf = [0u8; 1024];
+                    let _ = stream.read(&mut buf);
+                    // Write minimal HTTP response.
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\n\
+                         Content-Type: application/json\r\n\
+                         Access-Control-Allow-Origin: *\r\n\
+                         Cache-Control: no-store\r\n\
+                         Connection: close\r\n\
+                         Content-Length: {}\r\n\
+                         \r\n\
+                         {}",
+                        body.len(),
+                        body
+                    );
+                    stream.set_write_timeout(Some(Duration::from_millis(100))).ok();
+                    let _ = stream.write_all(resp.as_bytes());
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(_) => break,
+            }
+        }
+        debug_log("Packet server stopped");
+    });
+
+    port
+}
+
+// ---------------------------------------------------------------------------
+
 impl Editor for HardwaveBridgeEditor {
     fn spawn(
         &self,
@@ -233,6 +322,11 @@ impl Editor for HardwaveBridgeEditor {
         // (NotifyParentWindowPositionChanged). Without this subclass,
         // WebView2's DirectComposition layer doesn't know its screen
         // position → ghosting artifacts.
+        //
+        // FFT data is delivered via a local TCP server (start_packet_server).
+        // JS fetches http://127.0.0.1:{port}/ at ~60fps. Chrome permits
+        // HTTPS pages fetching from 127.0.0.1 (localhost is "potentially
+        // trustworthy" per the W3C spec), so no --disable-web-security needed.
         // ---------------------------------------------------------------
         #[cfg(target_os = "windows")]
         {
@@ -260,57 +354,97 @@ impl Editor for HardwaveBridgeEditor {
 
             debug_log(&format!("URL = {}", url));
 
-            // Clone the receiver for the custom protocol handler.
-            // evaluate_script from a background thread is unreliable on Windows
-            // because ICoreWebView2 is STA-bound. Instead, we register a custom
-            // protocol "hwpacket" that JS polls at ~60fps from the UI thread.
-            // The handler drains the crossbeam channel and returns the latest
-            // FFT packet as JSON — no cross-thread COM calls needed.
-            let packet_rx_proto = packet_rx.clone();
+            // Start the local HTTP server that serves FFT packets as JSON.
+            // JS polls http://127.0.0.1:{port}/ at ~60fps.
+            let server_port = start_packet_server(packet_rx.clone(), Arc::clone(&running));
+            debug_log(&format!("Packet server listening on port {}", server_port));
 
-            // Call counter for the protocol handler (for debug throttling)
-            let proto_call_count = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-            let proto_call_count_clone = std::sync::Arc::clone(&proto_call_count);
+            let init_script = format!(
+                r#"
+                window.__HARDWAVE_VST = true;
+                window.__hardwave = {{
+                    saveToken: function(token) {{
+                        window.ipc.postMessage('saveToken:' + token);
+                    }}
+                }};
+
+                // Poll for FFT data from the local TCP packet server.
+                // On Windows, evaluate_script from a Rust background thread
+                // fails silently (ICoreWebView2 is STA-bound). Instead, JS
+                // fetches http://127.0.0.1:{port}/ at ~60fps from the real
+                // TCP server. Chrome permits HTTPS→http://127.0.0.1 because
+                // loopback is considered potentially trustworthy.
+                (function() {{
+                    var _polling = false;
+                    var _fetchOk = 0;
+                    var _fetchNull = 0;
+                    var _fetchErr = 0;
+                    var _packetsSent = 0;
+
+                    function dbg(msg) {{
+                        try {{ window.ipc.postMessage('debug:' + msg); }} catch(e) {{}}
+                    }}
+
+                    function startPolling() {{
+                        if (_polling) return;
+                        _polling = true;
+                        dbg('polling started on ' + window.location.href + ' port={port}');
+
+                        (function poll() {{
+                            fetch('http://127.0.0.1:{port}/')
+                                .then(function(r) {{
+                                    _fetchOk++;
+                                    return r.json();
+                                }})
+                                .then(function(data) {{
+                                    if (data !== null) {{
+                                        if (typeof window.__onAudioPacket === 'function') {{
+                                            window.__onAudioPacket(data);
+                                            _packetsSent++;
+                                            if (_packetsSent <= 3) {{
+                                                dbg('packet delivered #' + _packetsSent +
+                                                    ' peak=' + data.left_peak);
+                                            }}
+                                        }} else {{
+                                            _fetchNull++;
+                                        }}
+                                    }} else {{
+                                        _fetchNull++;
+                                    }}
+                                    // Report stats every ~5 seconds (300 polls @ 16ms)
+                                    if ((_fetchOk + _fetchErr) % 300 === 0) {{
+                                        dbg('poll stats: ok=' + _fetchOk +
+                                            ' null=' + _fetchNull +
+                                            ' err=' + _fetchErr +
+                                            ' sent=' + _packetsSent);
+                                    }}
+                                }})
+                                .catch(function(e) {{
+                                    _fetchErr++;
+                                    if (_fetchErr <= 3) {{
+                                        dbg('fetch error #' + _fetchErr + ': ' + e);
+                                    }}
+                                }})
+                                .finally(function() {{ setTimeout(poll, 16); }});
+                        }})();
+                    }}
+
+                    if (document.readyState === 'loading') {{
+                        document.addEventListener('DOMContentLoaded', startPolling);
+                    }} else {{
+                        startPolling();
+                    }}
+                }})();
+                "#,
+                port = server_port
+            );
 
             let webview = wry::WebViewBuilder::with_web_context(&mut web_context)
                 .with_additional_browser_args(
                     "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection \
-                     --disable-web-security \
-                     --allow-insecure-localhost \
-                     --disable-gpu"
+                     --allow-insecure-localhost"
                 )
                 .with_devtools(true)
-                .with_custom_protocol("hwpacket".into(), move |_id, _req| {
-                    use std::borrow::Cow;
-                    // Drain channel, return the latest packet (or null).
-                    // This closure runs on the WebView2 UI thread — safe.
-                    let n = proto_call_count_clone.fetch_add(1, Ordering::Relaxed);
-                    let mut latest: Option<AudioPacket> = None;
-                    while let Ok(p) = packet_rx_proto.try_recv() {
-                        latest = Some(p);
-                    }
-
-                    // Log first 5 calls + every 300th (~5 seconds)
-                    if n < 5 || n % 300 == 0 {
-                        debug_log(&format!(
-                            "hwpacket handler call #{}: has_data={}",
-                            n, latest.is_some()
-                        ));
-                    }
-
-                    let body: Vec<u8> = match latest {
-                        Some(p) => serde_json::to_string(&p)
-                            .unwrap_or_else(|_| "null".to_string())
-                            .into_bytes(),
-                        None => b"null".to_vec(),
-                    };
-                    wry::http::Response::builder()
-                        .header("Content-Type", "application/json")
-                        .header("Access-Control-Allow-Origin", "*")
-                        .header("Cache-Control", "no-store")
-                        .body(Cow::Owned(body))
-                        .unwrap()
-                })
                 .with_transparent(false)
                 .with_background_color((10, 10, 11, 255))
                 .with_visible(true)
@@ -326,91 +460,12 @@ impl Editor for HardwaveBridgeEditor {
                         debug_log(&format!("[js] {}", info));
                     }
                 })
-                .with_initialization_script(
-                    r#"
-                    window.__HARDWAVE_VST = true;
-                    window.__hardwave = {
-                        saveToken: function(token) {
-                            window.ipc.postMessage('saveToken:' + token);
-                        }
-                    };
-
-                    // Poll for FFT data via custom protocol.
-                    // On Windows, evaluate_script from a Rust background thread
-                    // fails silently (ICoreWebView2 is STA-bound). Instead, JS
-                    // fetches http://hwpacket.localhost/ at ~60fps; the wry
-                    // custom protocol handler runs on the UI thread and returns
-                    // the latest packet JSON from the crossbeam channel.
-                    // --disable-web-security + --allow-insecure-localhost allow
-                    // the HTTPS page to fetch from the http:// custom protocol.
-                    (function() {
-                        var _polling = false;
-                        var _fetchOk = 0;
-                        var _fetchNull = 0;
-                        var _fetchErr = 0;
-                        var _packetsSent = 0;
-
-                        function dbg(msg) {
-                            try { window.ipc.postMessage('debug:' + msg); } catch(e) {}
-                        }
-
-                        function startPolling() {
-                            if (_polling) return;
-                            _polling = true;
-                            dbg('polling started on ' + window.location.href);
-
-                            (function poll() {
-                                fetch('http://hwpacket.localhost/')
-                                    .then(function(r) {
-                                        _fetchOk++;
-                                        return r.json();
-                                    })
-                                    .then(function(data) {
-                                        if (data !== null) {
-                                            if (typeof window.__onAudioPacket === 'function') {
-                                                window.__onAudioPacket(data);
-                                                _packetsSent++;
-                                                if (_packetsSent <= 3) {
-                                                    dbg('packet delivered #' + _packetsSent +
-                                                        ' peak=' + data.left_peak);
-                                                }
-                                            } else {
-                                                _fetchNull++;
-                                            }
-                                        } else {
-                                            _fetchNull++;
-                                        }
-                                        // Report stats every ~5 seconds (300 polls @ 16ms)
-                                        if ((_fetchOk + _fetchErr) % 300 === 0) {
-                                            dbg('poll stats: ok=' + _fetchOk +
-                                                ' null=' + _fetchNull +
-                                                ' err=' + _fetchErr +
-                                                ' sent=' + _packetsSent);
-                                        }
-                                    })
-                                    .catch(function(e) {
-                                        _fetchErr++;
-                                        if (_fetchErr <= 3) {
-                                            dbg('fetch error #' + _fetchErr + ': ' + e);
-                                        }
-                                    })
-                                    .finally(function() { setTimeout(poll, 16); });
-                            })();
-                        }
-
-                        if (document.readyState === 'loading') {
-                            document.addEventListener('DOMContentLoaded', startPolling);
-                        } else {
-                            startPolling();
-                        }
-                    })();
-                    "#,
-                )
+                .with_initialization_script(&init_script)
                 .build(&parent_wrapper);
 
             match webview {
                 Ok(wv) => {
-                    debug_log("WebView created successfully (custom protocol active)!");
+                    debug_log("WebView created successfully (TCP packet server active)!");
                     Box::new(EditorHandle {
                         _thread: None,
                         _webview: Some(Arc::new(Mutex::new(SendWebView(wv)))),
