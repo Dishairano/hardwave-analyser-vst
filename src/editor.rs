@@ -66,15 +66,19 @@ fn ensure_webview2() {
     let temp_dir = std::env::temp_dir();
     let bootstrapper_path = temp_dir.join("MicrosoftEdgeWebview2Setup.exe");
 
-    // Download the Evergreen bootstrapper (~2 MB)
+    // Download the Evergreen bootstrapper (~2 MB).
+    // Pass the output path as a separate argument to avoid PowerShell
+    // command injection if the TEMP directory contains special characters.
     let download = Command::new("powershell")
         .args([
             "-NoProfile",
             "-Command",
-            &format!(
-                "Invoke-WebRequest -Uri 'https://go.microsoft.com/fwlink/p/?LinkId=2124703' -OutFile '{}'",
-                bootstrapper_path.display()
-            ),
+            "param([string]$OutFile); \
+             Invoke-WebRequest \
+               -Uri 'https://go.microsoft.com/fwlink/p/?LinkId=2124703' \
+               -OutFile $OutFile",
+            "-OutFile",
+            bootstrapper_path.to_str().unwrap_or(""),
         ])
         .output();
 
@@ -249,14 +253,13 @@ impl Editor for HardwaveBridgeEditor {
         let running = Arc::new(AtomicBool::new(true));
         let running_clone = Arc::clone(&running);
 
-        // Build the URL with token query param if available.
-        let url = {
-            let token = auth_token.lock();
-            match token.as_deref() {
-                Some(t) => format!("{}?token={}", ANALYSER_URL, t),
-                None => ANALYSER_URL.to_string(),
-            }
-        };
+        // Build the URL without the token — the token is injected via
+        // evaluate_script after the page loads to avoid it appearing in
+        // server access logs, browser history, or Referer headers.
+        let url = ANALYSER_URL.to_string();
+
+        // Capture the initial token to inject once the page is ready.
+        let initial_token: Option<String> = auth_token.lock().clone();
 
         // Extract raw handle values before spawning — ParentWindowHandle
         // contains *mut c_void which isn't Send, but the underlying values
@@ -298,8 +301,14 @@ impl Editor for HardwaveBridgeEditor {
                     let msg = req.body().as_str();
                     if let Some(token) = msg.strip_prefix("saveToken:") {
                         let token = token.trim().to_string();
-                        auth::save_token(&token);
-                        *ipc_auth_token.lock() = Some(token);
+                        // Basic JWT structure validation: three dot-separated
+                        // base64url segments. Reject anything that doesn't look
+                        // like a JWT before persisting to disk.
+                        let parts: Vec<&str> = token.splitn(4, '.').collect();
+                        if parts.len() == 3 && parts.iter().all(|p| !p.is_empty()) {
+                            auth::save_token(&token);
+                            *ipc_auth_token.lock() = Some(token);
+                        }
                     }
                 })
                 .with_initialization_script(
@@ -316,6 +325,20 @@ impl Editor for HardwaveBridgeEditor {
 
             match webview {
                 Ok(webview) => {
+                    // Inject the auth token once on startup via evaluate_script
+                    // rather than embedding it in the URL query string, so it
+                    // never appears in server logs or browser history.
+                    if let Some(ref tok) = initial_token {
+                        // Escape any backslashes and backticks before injecting.
+                        let safe = tok.replace('\\', "\\\\").replace('`', "\\`");
+                        let inject_js = format!(
+                            "window.__hardwave && window.__hardwave.onTokenReceived && \
+                             window.__hardwave.onTokenReceived(`{}`)",
+                            safe
+                        );
+                        let _ = webview.evaluate_script(&inject_js);
+                    }
+
                     while running_clone.load(Ordering::Relaxed) {
                         // Drain all available packets, keep only the latest.
                         let mut latest: Option<AudioPacket> = None;
