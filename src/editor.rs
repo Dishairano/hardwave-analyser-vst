@@ -11,6 +11,8 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 use wry::raw_window_handle as rwh06;
+#[cfg(target_os = "windows")]
+use wry::WebViewBuilderExtWindows;
 
 use crate::auth;
 use crate::protocol::AudioPacket;
@@ -222,7 +224,14 @@ impl Editor for HardwaveBridgeEditor {
             // build() creates the webview as a WS_CHILD of the parent HWND,
             // sizes it to fill the parent, AND subclasses the parent to
             // forward WM_SIZE/WM_WINDOWPOSCHANGED to the WebView2 controller.
+            //
+            // --disable-gpu forces software rendering, avoiding conflicts
+            // between WebView2's DirectComposition and the DAW's own
+            // rendering pipeline (FL Studio uses GDI/DirectX).
             let webview = wry::WebViewBuilder::new()
+                .with_additional_browser_args(
+                    "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --disable-gpu"
+                )
                 .with_transparent(false)
                 .with_background_color((10, 10, 11, 255))
                 .with_visible(true)
