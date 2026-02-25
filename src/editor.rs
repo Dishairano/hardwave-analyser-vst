@@ -237,6 +237,10 @@ impl HardwaveBridgeEditor {
                 position: wry::dpi::LogicalPosition::new(0, 0).into(),
                 size: wry::dpi::LogicalSize::new(EDITOR_WIDTH, EDITOR_HEIGHT).into(),
             })
+            .with_transparent(false)
+            .with_background_color((10, 10, 11, 255))
+            .with_visible(true)
+            .with_focused(true)
             .with_url(&url)
             .with_ipc_handler(move |req: wry::http::Request<String>| {
                 let msg = req.body().as_str();
@@ -282,6 +286,9 @@ impl Editor for HardwaveBridgeEditor {
 
             match webview {
                 Ok(wv) => {
+                    // Pump messages to let WebView2 initialize and render.
+                    pump_win32_messages();
+
                     let send_wv = Arc::new(Mutex::new(SendWebView(wv)));
                     let send_wv_clone = Arc::clone(&send_wv);
 
@@ -358,6 +365,10 @@ impl Editor for HardwaveBridgeEditor {
                         position: wry::dpi::LogicalPosition::new(0, 0).into(),
                         size: wry::dpi::LogicalSize::new(EDITOR_WIDTH, EDITOR_HEIGHT).into(),
                     })
+                    .with_transparent(false)
+                    .with_background_color((10, 10, 11, 255))
+                    .with_visible(true)
+                    .with_focused(true)
                     .with_url(&url)
                     .with_ipc_handler(move |req: wry::http::Request<String>| {
                         let msg = req.body().as_str();
