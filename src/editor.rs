@@ -447,7 +447,7 @@ impl Editor for HardwaveBridgeEditor {
                     "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection \
                      --allow-insecure-localhost"
                 )
-                .with_devtools(true)
+                .with_devtools(false)
                 .with_transparent(false)
                 .with_background_color((10, 10, 11, 255))
                 .with_visible(true)
