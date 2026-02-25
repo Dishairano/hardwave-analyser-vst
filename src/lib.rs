@@ -250,7 +250,15 @@ impl HardwaveBridge {
         self.ws_client.send(packet.clone());
 
         // Send to editor webview (non-blocking, drops if full)
-        let _ = self.editor_packet_tx.try_send(packet);
+        match self.editor_packet_tx.try_send(packet) {
+            Ok(_) => {},
+            Err(crossbeam_channel::TrySendError::Full(_)) => {
+                // Channel full — editor not draining fast enough (expected during load)
+            },
+            Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
+                // Receiver dropped — no editor open
+            },
+        }
     }
 }
 

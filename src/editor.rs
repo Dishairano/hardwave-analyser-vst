@@ -1,7 +1,9 @@
 //! Webview-based editor for Hardwave Bridge.
 //!
 //! Embeds a wry `WebView` that loads the Hardwave analyser page.
-//! The Rust side pushes FFT data into the webview via `evaluate_script`.
+//! On Windows, FFT data is delivered to the page via a custom protocol
+//! ("hwpacket://") that JS polls at ~60fps — this avoids cross-thread
+//! COM issues with WebView2's STA-bound ICoreWebView2::ExecuteScript.
 
 use crossbeam_channel::Receiver;
 use nih_plug::prelude::*;
@@ -9,6 +11,7 @@ use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
+#[cfg(not(target_os = "windows"))]
 use std::time::Duration;
 use wry::raw_window_handle as rwh06;
 #[cfg(target_os = "windows")]
@@ -220,7 +223,6 @@ impl Editor for HardwaveBridgeEditor {
     ) -> Box<dyn std::any::Any + Send> {
         let packet_rx = self.packet_rx.clone();
         let running = Arc::new(AtomicBool::new(true));
-        let running_clone = Arc::clone(&running);
         let auth_token = Arc::clone(&self.auth_token);
         let url = self.build_url();
 
@@ -239,58 +241,8 @@ impl Editor for HardwaveBridgeEditor {
                 _ => 0,
             };
             debug_log(&format!("spawn() called, parent HWND = 0x{:X}", parent_hwnd));
-            debug_log(&format!("current thread id = {:?}", std::thread::current().id()));
-
-            // Query COM apartment type on this thread
-            {
-                extern "system" {
-                    fn CoInitializeEx(reserved: *mut std::ffi::c_void, coinit: u32) -> i32;
-                    fn CoUninitialize();
-                }
-                const COINIT_APARTMENTTHREADED: u32 = 0x2;
-                let hr = unsafe { CoInitializeEx(std::ptr::null_mut(), COINIT_APARTMENTTHREADED) };
-                // S_OK=0, S_FALSE=1 (already STA), RPC_E_CHANGED_MODE=0x80010106 (MTA)
-                debug_log(&format!("CoInitializeEx(STA) returned 0x{:X}", hr as u32));
-                if hr == 0 || hr == 1 {
-                    unsafe { CoUninitialize() };
-                }
-            }
-
-            // Query parent window info
-            {
-                extern "system" {
-                    fn GetWindowLongW(hwnd: *mut std::ffi::c_void, index: i32) -> i32;
-                    fn GetClientRect(hwnd: *mut std::ffi::c_void, rect: *mut [i32; 4]) -> i32;
-                    fn IsWindow(hwnd: *mut std::ffi::c_void) -> i32;
-                    fn IsWindowVisible(hwnd: *mut std::ffi::c_void) -> i32;
-                    fn GetParent(hwnd: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
-                }
-                const GWL_STYLE: i32 = -16;
-                const GWL_EXSTYLE: i32 = -20;
-
-                let hwnd_ptr = parent_hwnd as *mut std::ffi::c_void;
-                let is_window = unsafe { IsWindow(hwnd_ptr) };
-                let is_visible = unsafe { IsWindowVisible(hwnd_ptr) };
-                let style = unsafe { GetWindowLongW(hwnd_ptr, GWL_STYLE) } as u32;
-                let exstyle = unsafe { GetWindowLongW(hwnd_ptr, GWL_EXSTYLE) } as u32;
-                let grandparent = unsafe { GetParent(hwnd_ptr) };
-                let mut rect = [0i32; 4];
-                unsafe { GetClientRect(hwnd_ptr, &mut rect) };
-
-                debug_log(&format!("IsWindow={}, IsWindowVisible={}", is_window, is_visible));
-                debug_log(&format!("parent style=0x{:08X}, exstyle=0x{:08X}", style, exstyle));
-                debug_log(&format!("parent client rect: {}x{}", rect[2] - rect[0], rect[3] - rect[1]));
-                debug_log(&format!("grandparent HWND = 0x{:X}", grandparent as usize));
-
-                let is_child = style & 0x40000000 != 0;
-                let has_clipchildren = style & 0x02000000 != 0;
-                let has_clipsiblings = style & 0x04000000 != 0;
-                debug_log(&format!("WS_CHILD={}, WS_CLIPCHILDREN={}, WS_CLIPSIBLINGS={}",
-                    is_child, has_clipchildren, has_clipsiblings));
-            }
 
             ensure_webview2();
-            debug_log("WebView2 check done, creating webview...");
 
             // Use a writable data directory for WebView2. The default is the
             // executable's folder (FL Studio's Program Files) which is not
@@ -308,10 +260,39 @@ impl Editor for HardwaveBridgeEditor {
 
             debug_log(&format!("URL = {}", url));
 
+            // Clone the receiver for the custom protocol handler.
+            // evaluate_script from a background thread is unreliable on Windows
+            // because ICoreWebView2 is STA-bound. Instead, we register a custom
+            // protocol "hwpacket" that JS polls at ~60fps from the UI thread.
+            // The handler drains the crossbeam channel and returns the latest
+            // FFT packet as JSON — no cross-thread COM calls needed.
+            let packet_rx_proto = packet_rx.clone();
+
             let webview = wry::WebViewBuilder::with_web_context(&mut web_context)
                 .with_additional_browser_args(
                     "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --disable-gpu"
                 )
+                .with_custom_protocol("hwpacket".into(), move |_id, _req| {
+                    use std::borrow::Cow;
+                    // Drain channel, return the latest packet (or null).
+                    // This closure runs on the WebView2 UI thread — safe.
+                    let mut latest: Option<AudioPacket> = None;
+                    while let Ok(p) = packet_rx_proto.try_recv() {
+                        latest = Some(p);
+                    }
+                    let body: Vec<u8> = match latest {
+                        Some(p) => serde_json::to_string(&p)
+                            .unwrap_or_else(|_| "null".to_string())
+                            .into_bytes(),
+                        None => b"null".to_vec(),
+                    };
+                    wry::http::Response::builder()
+                        .header("Content-Type", "application/json")
+                        .header("Access-Control-Allow-Origin", "*")
+                        .header("Cache-Control", "no-store")
+                        .body(Cow::Owned(body))
+                        .unwrap()
+                })
                 .with_transparent(false)
                 .with_background_color((10, 10, 11, 255))
                 .with_visible(true)
@@ -333,53 +314,50 @@ impl Editor for HardwaveBridgeEditor {
                             window.ipc.postMessage('saveToken:' + token);
                         }
                     };
+
+                    // Poll for FFT data via custom protocol.
+                    // On Windows, evaluate_script from a Rust background thread
+                    // fails silently (ICoreWebView2 is STA-bound). Instead, JS
+                    // fetches http://hwpacket.localhost/ at ~60fps; the wry
+                    // custom protocol handler runs on the UI thread and returns
+                    // the latest packet JSON from the crossbeam channel.
+                    (function() {
+                        var _polling = false;
+
+                        function startPolling() {
+                            if (_polling) return;
+                            _polling = true;
+
+                            (function poll() {
+                                fetch('http://hwpacket.localhost/')
+                                    .then(function(r) { return r.json(); })
+                                    .then(function(data) {
+                                        if (data !== null &&
+                                            typeof window.__onAudioPacket === 'function') {
+                                            window.__onAudioPacket(data);
+                                        }
+                                    })
+                                    .catch(function() {})
+                                    .finally(function() { setTimeout(poll, 16); });
+                            })();
+                        }
+
+                        if (document.readyState === 'loading') {
+                            document.addEventListener('DOMContentLoaded', startPolling);
+                        } else {
+                            startPolling();
+                        }
+                    })();
                     "#,
                 )
                 .build(&parent_wrapper);
 
             match webview {
                 Ok(wv) => {
-                    debug_log("WebView created successfully!");
-
-                    match wv.bounds() {
-                        Ok(bounds) => {
-                            debug_log(&format!("webview bounds: pos={:?}, size={:?}",
-                                bounds.position, bounds.size));
-                        }
-                        Err(e) => {
-                            debug_log(&format!("failed to query bounds: {}", e));
-                        }
-                    }
-
-                    let send_wv = Arc::new(Mutex::new(SendWebView(wv)));
-                    let send_wv_clone = Arc::clone(&send_wv);
-
-                    let _injector = thread::spawn(move || {
-                        while running_clone.load(Ordering::Relaxed) {
-                            let mut latest: Option<AudioPacket> = None;
-                            while let Ok(packet) = packet_rx.try_recv() {
-                                latest = Some(packet);
-                            }
-
-                            if let Some(packet) = latest {
-                                let json = serde_json::to_string(&packet).unwrap_or_default();
-                                let js = format!(
-                                    "window.__onAudioPacket && window.__onAudioPacket({})",
-                                    json
-                                );
-                                let wv = send_wv_clone.lock();
-                                let _ = wv.0.evaluate_script(&js);
-                            }
-
-                            thread::sleep(Duration::from_millis(16));
-                        }
-                    });
-
-                    debug_log("Editor spawn complete, injector thread started");
-
+                    debug_log("WebView created successfully (custom protocol active)!");
                     Box::new(EditorHandle {
                         _thread: None,
-                        _webview: Some(send_wv),
+                        _webview: Some(Arc::new(Mutex::new(SendWebView(wv)))),
                         _web_context: Some(SendWebContext(web_context)),
                         running,
                     })
@@ -401,6 +379,7 @@ impl Editor for HardwaveBridgeEditor {
         // ---------------------------------------------------------------
         #[cfg(not(target_os = "windows"))]
         {
+            let running_clone = Arc::clone(&running);
             let parent_data = match parent {
                 ParentWindowHandle::X11Window(w) => ParentData::X11(w),
                 ParentWindowHandle::AppKitNsView(v) => ParentData::AppKit(v as usize),
