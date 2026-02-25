@@ -268,6 +268,10 @@ impl Editor for HardwaveBridgeEditor {
             // FFT packet as JSON — no cross-thread COM calls needed.
             let packet_rx_proto = packet_rx.clone();
 
+            // Call counter for the protocol handler (for debug throttling)
+            let proto_call_count = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let proto_call_count_clone = std::sync::Arc::clone(&proto_call_count);
+
             let webview = wry::WebViewBuilder::with_web_context(&mut web_context)
                 .with_additional_browser_args(
                     "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --disable-gpu"
@@ -276,10 +280,20 @@ impl Editor for HardwaveBridgeEditor {
                     use std::borrow::Cow;
                     // Drain channel, return the latest packet (or null).
                     // This closure runs on the WebView2 UI thread — safe.
+                    let n = proto_call_count_clone.fetch_add(1, Ordering::Relaxed);
                     let mut latest: Option<AudioPacket> = None;
                     while let Ok(p) = packet_rx_proto.try_recv() {
                         latest = Some(p);
                     }
+
+                    // Log first 5 calls + every 300th (~5 seconds)
+                    if n < 5 || n % 300 == 0 {
+                        debug_log(&format!(
+                            "hwpacket handler call #{}: has_data={}",
+                            n, latest.is_some()
+                        ));
+                    }
+
                     let body: Vec<u8> = match latest {
                         Some(p) => serde_json::to_string(&p)
                             .unwrap_or_else(|_| "null".to_string())
@@ -304,6 +318,8 @@ impl Editor for HardwaveBridgeEditor {
                         let token = token.trim().to_string();
                         auth::save_token(&token);
                         *ipc_auth_token.lock() = Some(token);
+                    } else if let Some(info) = msg.strip_prefix("debug:") {
+                        debug_log(&format!("[js] {}", info));
                     }
                 })
                 .with_initialization_script(
@@ -323,21 +339,55 @@ impl Editor for HardwaveBridgeEditor {
                     // the latest packet JSON from the crossbeam channel.
                     (function() {
                         var _polling = false;
+                        var _fetchOk = 0;
+                        var _fetchNull = 0;
+                        var _fetchErr = 0;
+                        var _packetsSent = 0;
+
+                        function dbg(msg) {
+                            try { window.ipc.postMessage('debug:' + msg); } catch(e) {}
+                        }
 
                         function startPolling() {
                             if (_polling) return;
                             _polling = true;
+                            dbg('polling started on ' + window.location.href);
 
                             (function poll() {
                                 fetch('http://hwpacket.localhost/')
-                                    .then(function(r) { return r.json(); })
+                                    .then(function(r) {
+                                        _fetchOk++;
+                                        return r.json();
+                                    })
                                     .then(function(data) {
-                                        if (data !== null &&
-                                            typeof window.__onAudioPacket === 'function') {
-                                            window.__onAudioPacket(data);
+                                        if (data !== null) {
+                                            if (typeof window.__onAudioPacket === 'function') {
+                                                window.__onAudioPacket(data);
+                                                _packetsSent++;
+                                                if (_packetsSent <= 3) {
+                                                    dbg('packet delivered #' + _packetsSent +
+                                                        ' peak=' + data.left_peak);
+                                                }
+                                            } else {
+                                                _fetchNull++;
+                                            }
+                                        } else {
+                                            _fetchNull++;
+                                        }
+                                        // Report stats every ~5 seconds (300 polls @ 16ms)
+                                        if ((_fetchOk + _fetchErr) % 300 === 0) {
+                                            dbg('poll stats: ok=' + _fetchOk +
+                                                ' null=' + _fetchNull +
+                                                ' err=' + _fetchErr +
+                                                ' sent=' + _packetsSent);
                                         }
                                     })
-                                    .catch(function() {})
+                                    .catch(function(e) {
+                                        _fetchErr++;
+                                        if (_fetchErr <= 3) {
+                                            dbg('fetch error #' + _fetchErr + ': ' + e);
+                                        }
+                                    })
                                     .finally(function() { setTimeout(poll, 16); });
                             })();
                         }

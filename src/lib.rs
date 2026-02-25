@@ -222,6 +222,17 @@ impl Plugin for HardwaveBridge {
 }
 
 impl HardwaveBridge {
+    /// Write a line to the same debug log as editor.rs
+    fn debug_log(msg: &str) {
+        use std::io::Write;
+        let path = { let mut p = std::env::temp_dir(); p.push("hardwave-debug.log"); p };
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+            let _ = writeln!(f, "[{}] [lib] {}", now, msg);
+        }
+    }
+
     /// Process and send FFT data
     fn send_fft_data(&mut self) {
         // Process FFT for both channels
@@ -234,6 +245,14 @@ impl HardwaveBridge {
 
         // Create and send packet
         let timestamp_ms = self.start_time.elapsed().as_millis() as u64;
+
+        // Log first 3 packets so we know FFT is running
+        if timestamp_ms < 3000 || timestamp_ms % 10000 < 100 {
+            Self::debug_log(&format!(
+                "send_fft_data: ts={}ms sr={} left_peak={:.1}",
+                timestamp_ms, self.sample_rate as u32, left_peak
+            ));
+        }
 
         let packet = AudioPacket::new_fft(
             self.sample_rate as u32,
@@ -253,10 +272,10 @@ impl HardwaveBridge {
         match self.editor_packet_tx.try_send(packet) {
             Ok(_) => {},
             Err(crossbeam_channel::TrySendError::Full(_)) => {
-                // Channel full — editor not draining fast enough (expected during load)
+                Self::debug_log("editor channel FULL — dropping packet");
             },
             Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
-                // Receiver dropped — no editor open
+                Self::debug_log("editor channel DISCONNECTED — no receivers");
             },
         }
     }
