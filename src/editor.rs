@@ -1,13 +1,7 @@
 //! Webview-based editor for Hardwave Bridge.
 //!
-//! Embeds a wry `WebView` that loads `https://hardwave.studio/vst/analyser`.
+//! Embeds a wry `WebView` that loads the Hardwave analyser page.
 //! The Rust side pushes FFT data into the webview via `evaluate_script`.
-//!
-//! Key design constraints:
-//! - wry's `WebView` is **not** `Send` on Linux (GTK). All webview access
-//!   must happen on the thread that created it.
-//! - nih-plug uses `raw-window-handle` 0.5 while wry re-exports 0.6. We
-//!   bridge this with a thin wrapper.
 
 use crossbeam_channel::Receiver;
 use nih_plug::prelude::*;
@@ -25,13 +19,10 @@ use crate::protocol::AudioPacket;
 // WebView2 auto-install (Windows only)
 // ---------------------------------------------------------------------------
 
-/// Ensures the WebView2 Evergreen Runtime is installed. If missing, downloads
-/// the ~2 MB bootstrapper from Microsoft and runs it silently.
 #[cfg(target_os = "windows")]
 fn ensure_webview2() {
     use std::process::Command;
 
-    // Check if WebView2 is already available by looking for the registry key.
     let installed = Command::new("reg")
         .args([
             "query",
@@ -42,11 +33,8 @@ fn ensure_webview2() {
         .map(|o| o.status.success())
         .unwrap_or(false);
 
-    if installed {
-        return;
-    }
+    if installed { return; }
 
-    // Also check per-user install
     let installed_user = Command::new("reg")
         .args([
             "query",
@@ -57,16 +45,13 @@ fn ensure_webview2() {
         .map(|o| o.status.success())
         .unwrap_or(false);
 
-    if installed_user {
-        return;
-    }
+    if installed_user { return; }
 
     nih_log!("WebView2 Runtime not found — downloading bootstrapper...");
 
     let temp_dir = std::env::temp_dir();
     let bootstrapper_path = temp_dir.join("MicrosoftEdgeWebview2Setup.exe");
 
-    // Download the Evergreen bootstrapper (~2 MB)
     let download = Command::new("powershell")
         .args([
             "-NoProfile",
@@ -84,7 +69,6 @@ fn ensure_webview2() {
             let _ = Command::new(&bootstrapper_path)
                 .args(["/silent", "/install"])
                 .output();
-            // Clean up
             let _ = std::fs::remove_file(&bootstrapper_path);
         }
         _ => {
@@ -93,8 +77,10 @@ fn ensure_webview2() {
     }
 }
 
-/// Pump all pending Win32 messages on the current thread.
-/// Required for WebView2 to process events and render content.
+// ---------------------------------------------------------------------------
+// Win32 helpers
+// ---------------------------------------------------------------------------
+
 #[cfg(target_os = "windows")]
 fn pump_win32_messages() {
     #[repr(C)]
@@ -136,8 +122,6 @@ const ANALYSER_URL: &str = "https://hardwavestudios.com/vst/analyser";
 // raw-window-handle 0.5 (nih-plug) → 0.6 (wry) bridge
 // ---------------------------------------------------------------------------
 
-/// Wrapper around nih-plug's `ParentWindowHandle` that implements the rwh 0.6
-/// traits (`HasWindowHandle` + `HasDisplayHandle`) so wry can consume it.
 struct RwhWrapper(ParentWindowHandle);
 
 impl rwh06::HasWindowHandle for RwhWrapper {
@@ -201,9 +185,6 @@ impl rwh06::HasDisplayHandle for RwhWrapper {
 // Editor
 // ---------------------------------------------------------------------------
 
-/// Send-safe representation of the parent window handle. We extract the raw
-/// values from nih-plug's `ParentWindowHandle` (which contains `*mut c_void`)
-/// and reconstruct them on the editor thread.
 #[derive(Clone, Copy)]
 enum ParentData {
     X11(u32),
@@ -211,19 +192,18 @@ enum ParentData {
     Win32(usize),
 }
 
-// SAFETY: The underlying window handles are valid pointers owned by the DAW
-// host and guaranteed to outlive the editor by the plugin API contract.
 unsafe impl Send for ParentData {}
 
-/// Editor that embeds a wry webview loading the Hardwave website analyser.
+/// Wrapper to make wry::WebView sendable across threads.
+/// SAFETY: On Windows, we create the webview on the DAW's UI thread and only
+/// access it from a background thread for evaluate_script calls, which WebView2
+/// marshals to the UI thread internally.
+struct SendWebView(wry::WebView);
+unsafe impl Send for SendWebView {}
+
 pub struct HardwaveBridgeEditor {
-    /// Receives audio packets from the plugin's process thread.
     packet_rx: Receiver<AudioPacket>,
-
-    /// Cached auth token loaded from disk at plugin init.
     auth_token: Arc<Mutex<Option<String>>>,
-
-    /// Current editor size.
     size: (u32, u32),
 }
 
@@ -236,6 +216,48 @@ impl HardwaveBridgeEditor {
             size: (EDITOR_WIDTH, EDITOR_HEIGHT),
         }
     }
+
+    fn build_url(&self) -> String {
+        let token = self.auth_token.lock();
+        match token.as_deref() {
+            Some(t) => format!("{}?token={}", ANALYSER_URL, t),
+            None => ANALYSER_URL.to_string(),
+        }
+    }
+
+    fn create_webview(
+        &self,
+        parent: &RwhWrapper,
+    ) -> Result<wry::WebView, wry::Error> {
+        let url = self.build_url();
+        let auth_token = Arc::clone(&self.auth_token);
+
+        wry::WebViewBuilder::new()
+            .with_bounds(wry::Rect {
+                position: wry::dpi::LogicalPosition::new(0, 0).into(),
+                size: wry::dpi::LogicalSize::new(EDITOR_WIDTH, EDITOR_HEIGHT).into(),
+            })
+            .with_url(&url)
+            .with_ipc_handler(move |req: wry::http::Request<String>| {
+                let msg = req.body().as_str();
+                if let Some(token) = msg.strip_prefix("saveToken:") {
+                    let token = token.trim().to_string();
+                    auth::save_token(&token);
+                    *auth_token.lock() = Some(token);
+                }
+            })
+            .with_initialization_script(
+                r#"
+                window.__HARDWAVE_VST = true;
+                window.__hardwave = {
+                    saveToken: function(token) {
+                        window.ipc.postMessage('saveToken:' + token);
+                    }
+                };
+                "#,
+            )
+            .build_as_child(parent)
+    }
 }
 
 impl Editor for HardwaveBridgeEditor {
@@ -245,119 +267,157 @@ impl Editor for HardwaveBridgeEditor {
         _context: Arc<dyn GuiContext>,
     ) -> Box<dyn std::any::Any + Send> {
         let packet_rx = self.packet_rx.clone();
-        let auth_token = Arc::clone(&self.auth_token);
         let running = Arc::new(AtomicBool::new(true));
         let running_clone = Arc::clone(&running);
 
-        // Build the URL with token query param if available.
-        let url = {
-            let token = auth_token.lock();
-            match token.as_deref() {
-                Some(t) => format!("{}?token={}", ANALYSER_URL, t),
-                None => ANALYSER_URL.to_string(),
-            }
-        };
-
-        // Extract raw handle values before spawning — ParentWindowHandle
-        // contains *mut c_void which isn't Send, but the underlying values
-        // (window ID / pointer) are safe to send across threads as long as
-        // the parent outlives the editor (guaranteed by nih-plug).
-        let parent_data = match parent {
-            ParentWindowHandle::X11Window(w) => ParentData::X11(w),
-            ParentWindowHandle::AppKitNsView(v) => ParentData::AppKit(v as usize),
-            ParentWindowHandle::Win32Hwnd(h) => ParentData::Win32(h as usize),
-        };
-
-        // Spawn a dedicated thread that creates the webview and runs the
-        // packet injection loop. The webview must only be accessed from
-        // the thread that created it (GTK requirement on Linux).
-        let handle = thread::spawn(move || {
-            #[cfg(all(target_os = "linux", feature = "gtk"))]
-            {
-                let _ = gtk::init();
-            }
-
-            #[cfg(target_os = "windows")]
+        // On Windows: create the webview HERE on the DAW's UI thread, then
+        // hand it to a background thread for packet injection only.
+        // On Linux: must create on a thread with GTK init.
+        #[cfg(target_os = "windows")]
+        {
             ensure_webview2();
 
-            let reconstructed = match parent_data {
-                ParentData::X11(w) => ParentWindowHandle::X11Window(w),
-                ParentData::AppKit(v) => ParentWindowHandle::AppKitNsView(v as *mut std::ffi::c_void),
-                ParentData::Win32(h) => ParentWindowHandle::Win32Hwnd(h as *mut std::ffi::c_void),
-            };
-            let parent_wrapper = RwhWrapper(reconstructed);
-
-            let ipc_auth_token = Arc::clone(&auth_token);
-            let webview = wry::WebViewBuilder::new()
-                .with_bounds(wry::Rect {
-                    position: wry::dpi::LogicalPosition::new(0, 0).into(),
-                    size: wry::dpi::LogicalSize::new(EDITOR_WIDTH, EDITOR_HEIGHT).into(),
-                })
-                .with_url(&url)
-                .with_ipc_handler(move |req: wry::http::Request<String>| {
-                    let msg = req.body().as_str();
-                    if let Some(token) = msg.strip_prefix("saveToken:") {
-                        let token = token.trim().to_string();
-                        auth::save_token(&token);
-                        *ipc_auth_token.lock() = Some(token);
-                    }
-                })
-                .with_initialization_script(
-                    r#"
-                    window.__HARDWAVE_VST = true;
-                    window.__hardwave = {
-                        saveToken: function(token) {
-                            window.ipc.postMessage('saveToken:' + token);
-                        }
-                    };
-                    "#,
-                )
-                .build_as_child(&parent_wrapper);
+            let parent_wrapper = RwhWrapper(parent);
+            let webview = self.create_webview(&parent_wrapper);
 
             match webview {
-                Ok(webview) => {
-                    while running_clone.load(Ordering::Relaxed) {
-                        // Drain all available packets, keep only the latest.
-                        let mut latest: Option<AudioPacket> = None;
-                        while let Ok(packet) = packet_rx.try_recv() {
-                            latest = Some(packet);
-                        }
+                Ok(wv) => {
+                    let send_wv = Arc::new(Mutex::new(SendWebView(wv)));
+                    let send_wv_clone = Arc::clone(&send_wv);
 
-                        if let Some(packet) = latest {
-                            let json = serde_json::to_string(&packet).unwrap_or_default();
-                            let js = format!(
-                                "window.__onAudioPacket && window.__onAudioPacket({})",
-                                json
-                            );
-                            let _ = webview.evaluate_script(&js);
-                        }
-
-                        #[cfg(all(target_os = "linux", feature = "gtk"))]
-                        {
-                            while gtk::events_pending() {
-                                gtk::main_iteration_do(false);
+                    // Background thread only for injecting FFT packets.
+                    let _injector = thread::spawn(move || {
+                        while running_clone.load(Ordering::Relaxed) {
+                            let mut latest: Option<AudioPacket> = None;
+                            while let Ok(packet) = packet_rx.try_recv() {
+                                latest = Some(packet);
                             }
-                        }
 
-                        // Pump Windows messages so WebView2 can process events.
-                        #[cfg(target_os = "windows")]
-                        {
-                            pump_win32_messages();
-                        }
+                            if let Some(packet) = latest {
+                                let json = serde_json::to_string(&packet).unwrap_or_default();
+                                let js = format!(
+                                    "window.__onAudioPacket && window.__onAudioPacket({})",
+                                    json
+                                );
+                                let wv = send_wv_clone.lock();
+                                let _ = wv.0.evaluate_script(&js);
+                            }
 
-                        thread::sleep(Duration::from_millis(16)); // ~60 Hz
-                    }
+                            thread::sleep(Duration::from_millis(16));
+                        }
+                    });
+
+                    Box::new(EditorHandle {
+                        _thread: None,
+                        _webview: Some(send_wv),
+                        running,
+                    })
                 }
                 Err(e) => {
                     nih_log!("Failed to create webview: {}", e);
+                    Box::new(EditorHandle {
+                        _thread: None,
+                        _webview: None,
+                        running,
+                    })
                 }
             }
-        });
+        }
 
-        Box::new(EditorHandle {
-            _thread: Some(handle),
-            running,
-        })
+        #[cfg(not(target_os = "windows"))]
+        {
+            let parent_data = match parent {
+                ParentWindowHandle::X11Window(w) => ParentData::X11(w),
+                ParentWindowHandle::AppKitNsView(v) => ParentData::AppKit(v as usize),
+                ParentWindowHandle::Win32Hwnd(h) => ParentData::Win32(h as usize),
+            };
+
+            let auth_token = Arc::clone(&self.auth_token);
+            let url = self.build_url();
+
+            let handle = thread::spawn(move || {
+                #[cfg(all(target_os = "linux", feature = "gtk"))]
+                {
+                    let _ = gtk::init();
+                }
+
+                let reconstructed = match parent_data {
+                    ParentData::X11(w) => ParentWindowHandle::X11Window(w),
+                    ParentData::AppKit(v) => {
+                        ParentWindowHandle::AppKitNsView(v as *mut std::ffi::c_void)
+                    }
+                    ParentData::Win32(h) => {
+                        ParentWindowHandle::Win32Hwnd(h as *mut std::ffi::c_void)
+                    }
+                };
+                let parent_wrapper = RwhWrapper(reconstructed);
+
+                let ipc_auth_token = Arc::clone(&auth_token);
+                let webview = wry::WebViewBuilder::new()
+                    .with_bounds(wry::Rect {
+                        position: wry::dpi::LogicalPosition::new(0, 0).into(),
+                        size: wry::dpi::LogicalSize::new(EDITOR_WIDTH, EDITOR_HEIGHT).into(),
+                    })
+                    .with_url(&url)
+                    .with_ipc_handler(move |req: wry::http::Request<String>| {
+                        let msg = req.body().as_str();
+                        if let Some(token) = msg.strip_prefix("saveToken:") {
+                            let token = token.trim().to_string();
+                            auth::save_token(&token);
+                            *ipc_auth_token.lock() = Some(token);
+                        }
+                    })
+                    .with_initialization_script(
+                        r#"
+                        window.__HARDWAVE_VST = true;
+                        window.__hardwave = {
+                            saveToken: function(token) {
+                                window.ipc.postMessage('saveToken:' + token);
+                            }
+                        };
+                        "#,
+                    )
+                    .build_as_child(&parent_wrapper);
+
+                match webview {
+                    Ok(webview) => {
+                        while running_clone.load(Ordering::Relaxed) {
+                            let mut latest: Option<AudioPacket> = None;
+                            while let Ok(packet) = packet_rx.try_recv() {
+                                latest = Some(packet);
+                            }
+
+                            if let Some(packet) = latest {
+                                let json = serde_json::to_string(&packet).unwrap_or_default();
+                                let js = format!(
+                                    "window.__onAudioPacket && window.__onAudioPacket({})",
+                                    json
+                                );
+                                let _ = webview.evaluate_script(&js);
+                            }
+
+                            #[cfg(all(target_os = "linux", feature = "gtk"))]
+                            {
+                                while gtk::events_pending() {
+                                    gtk::main_iteration_do(false);
+                                }
+                            }
+
+                            thread::sleep(Duration::from_millis(16));
+                        }
+                    }
+                    Err(e) => {
+                        nih_log!("Failed to create webview: {}", e);
+                    }
+                }
+            });
+
+            Box::new(EditorHandle {
+                _thread: Some(handle),
+                _webview: None,
+                running,
+            })
+        }
     }
 
     fn size(&self) -> (u32, u32) {
@@ -369,15 +429,15 @@ impl Editor for HardwaveBridgeEditor {
     }
 
     fn param_value_changed(&self, _id: &str, _normalized_value: f32) {}
-
     fn param_modulation_changed(&self, _id: &str, _modulation_offset: f32) {}
-
     fn param_values_changed(&self) {}
 }
 
-/// Handle returned from `spawn()`. When dropped, the editor thread stops.
+/// Handle returned from `spawn()`. When dropped, the editor closes.
 struct EditorHandle {
     _thread: Option<thread::JoinHandle<()>>,
+    /// Prevent the webview from being dropped while the editor is open.
+    _webview: Option<Arc<Mutex<SendWebView>>>,
     running: Arc<AtomicBool>,
 }
 
