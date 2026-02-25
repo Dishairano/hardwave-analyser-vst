@@ -276,6 +276,9 @@ impl Editor for HardwaveBridgeEditor {
                 .with_additional_browser_args(
                     "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --disable-gpu"
                 )
+                // Use HTTPS scheme so the page (also HTTPS) can fetch without
+                // mixed-content blocking. Accesses as https://hwpacket.localhost/
+                .with_https_scheme(true)
                 .with_custom_protocol("hwpacket".into(), move |_id, _req| {
                     use std::borrow::Cow;
                     // Drain channel, return the latest packet (or null).
@@ -334,9 +337,12 @@ impl Editor for HardwaveBridgeEditor {
                     // Poll for FFT data via custom protocol.
                     // On Windows, evaluate_script from a Rust background thread
                     // fails silently (ICoreWebView2 is STA-bound). Instead, JS
-                    // fetches http://hwpacket.localhost/ at ~60fps; the wry
+                    // fetches https://hwpacket.localhost/ at ~60fps; the wry
                     // custom protocol handler runs on the UI thread and returns
                     // the latest packet JSON from the crossbeam channel.
+                    // with_https_scheme(true) makes the custom protocol serve
+                    // as https:// so the HTTPS page can fetch it without
+                    // mixed-content blocking.
                     (function() {
                         var _polling = false;
                         var _fetchOk = 0;
@@ -354,7 +360,7 @@ impl Editor for HardwaveBridgeEditor {
                             dbg('polling started on ' + window.location.href);
 
                             (function poll() {
-                                fetch('http://hwpacket.localhost/')
+                                fetch('https://hwpacket.localhost/')
                                     .then(function(r) {
                                         _fetchOk++;
                                         return r.json();
