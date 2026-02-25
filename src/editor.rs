@@ -216,18 +216,72 @@ impl Editor for HardwaveBridgeEditor {
         // ---------------------------------------------------------------
         #[cfg(target_os = "windows")]
         {
+            // Log parent HWND info
+            let parent_hwnd = match parent {
+                ParentWindowHandle::Win32Hwnd(h) => h as usize,
+                _ => 0,
+            };
+            nih_log!("[hardwave] spawn() called, parent HWND = 0x{:X}", parent_hwnd);
+            nih_log!("[hardwave] current thread id = {:?}", std::thread::current().id());
+
+            // Query COM apartment type on this thread
+            {
+                extern "system" {
+                    fn CoInitializeEx(reserved: *mut std::ffi::c_void, coinit: u32) -> i32;
+                    fn CoUninitialize();
+                }
+                const COINIT_APARTMENTTHREADED: u32 = 0x2;
+                let hr = unsafe { CoInitializeEx(std::ptr::null_mut(), COINIT_APARTMENTTHREADED) };
+                // S_OK=0, S_FALSE=1 (already STA), RPC_E_CHANGED_MODE=0x80010106 (MTA)
+                nih_log!("[hardwave] CoInitializeEx(STA) returned 0x{:X}", hr as u32);
+                if hr == 0 || hr == 1 {
+                    // We successfully entered STA (or were already in it), undo our call
+                    unsafe { CoUninitialize() };
+                }
+            }
+
+            // Query parent window info
+            {
+                extern "system" {
+                    fn GetWindowLongW(hwnd: *mut std::ffi::c_void, index: i32) -> i32;
+                    fn GetClientRect(hwnd: *mut std::ffi::c_void, rect: *mut [i32; 4]) -> i32;
+                    fn IsWindow(hwnd: *mut std::ffi::c_void) -> i32;
+                    fn IsWindowVisible(hwnd: *mut std::ffi::c_void) -> i32;
+                    fn GetParent(hwnd: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
+                }
+                const GWL_STYLE: i32 = -16;
+                const GWL_EXSTYLE: i32 = -20;
+
+                let hwnd_ptr = parent_hwnd as *mut std::ffi::c_void;
+                let is_window = unsafe { IsWindow(hwnd_ptr) };
+                let is_visible = unsafe { IsWindowVisible(hwnd_ptr) };
+                let style = unsafe { GetWindowLongW(hwnd_ptr, GWL_STYLE) } as u32;
+                let exstyle = unsafe { GetWindowLongW(hwnd_ptr, GWL_EXSTYLE) } as u32;
+                let grandparent = unsafe { GetParent(hwnd_ptr) };
+                let mut rect = [0i32; 4];
+                unsafe { GetClientRect(hwnd_ptr, &mut rect) };
+
+                nih_log!("[hardwave] IsWindow={}, IsWindowVisible={}", is_window, is_visible);
+                nih_log!("[hardwave] parent style=0x{:08X}, exstyle=0x{:08X}", style, exstyle);
+                nih_log!("[hardwave] parent client rect: {}x{}", rect[2] - rect[0], rect[3] - rect[1]);
+                nih_log!("[hardwave] grandparent HWND = 0x{:X}", grandparent as usize);
+
+                // Decode key style bits
+                let is_child = style & 0x40000000 != 0; // WS_CHILD
+                let has_clipchildren = style & 0x02000000 != 0; // WS_CLIPCHILDREN
+                let has_clipsiblings = style & 0x04000000 != 0; // WS_CLIPSIBLINGS
+                nih_log!("[hardwave] WS_CHILD={}, WS_CLIPCHILDREN={}, WS_CLIPSIBLINGS={}",
+                    is_child, has_clipchildren, has_clipsiblings);
+            }
+
             ensure_webview2();
+            nih_log!("[hardwave] WebView2 check done, creating webview...");
 
             let parent_wrapper = RwhWrapper(parent);
             let ipc_auth_token = Arc::clone(&auth_token);
 
-            // build() creates the webview as a WS_CHILD of the parent HWND,
-            // sizes it to fill the parent, AND subclasses the parent to
-            // forward WM_SIZE/WM_WINDOWPOSCHANGED to the WebView2 controller.
-            //
-            // --disable-gpu forces software rendering, avoiding conflicts
-            // between WebView2's DirectComposition and the DAW's own
-            // rendering pipeline (FL Studio uses GDI/DirectX).
+            nih_log!("[hardwave] URL = {}", url);
+
             let webview = wry::WebViewBuilder::new()
                 .with_additional_browser_args(
                     "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --disable-gpu"
@@ -259,11 +313,22 @@ impl Editor for HardwaveBridgeEditor {
 
             match webview {
                 Ok(wv) => {
+                    nih_log!("[hardwave] WebView created successfully!");
+
+                    // Query webview bounds after creation
+                    match wv.bounds() {
+                        Ok(bounds) => {
+                            nih_log!("[hardwave] webview bounds: pos={:?}, size={:?}",
+                                bounds.position, bounds.size);
+                        }
+                        Err(e) => {
+                            nih_log!("[hardwave] failed to query bounds: {}", e);
+                        }
+                    }
+
                     let send_wv = Arc::new(Mutex::new(SendWebView(wv)));
                     let send_wv_clone = Arc::clone(&send_wv);
 
-                    // Background thread only for injecting FFT packets.
-                    // evaluate_script marshals to the UI thread internally.
                     let _injector = thread::spawn(move || {
                         while running_clone.load(Ordering::Relaxed) {
                             let mut latest: Option<AudioPacket> = None;
@@ -285,6 +350,8 @@ impl Editor for HardwaveBridgeEditor {
                         }
                     });
 
+                    nih_log!("[hardwave] Editor spawn complete, injector thread started");
+
                     Box::new(EditorHandle {
                         _thread: None,
                         _webview: Some(send_wv),
@@ -292,7 +359,7 @@ impl Editor for HardwaveBridgeEditor {
                     })
                 }
                 Err(e) => {
-                    nih_log!("Failed to create webview: {}", e);
+                    nih_log!("[hardwave] FAILED to create webview: {}", e);
                     Box::new(EditorHandle {
                         _thread: None,
                         _webview: None,
@@ -424,6 +491,7 @@ struct EditorHandle {
 
 impl Drop for EditorHandle {
     fn drop(&mut self) {
+        nih_log!("[hardwave] EditorHandle dropped, closing editor");
         self.running.store(false, Ordering::Relaxed);
     }
 }
