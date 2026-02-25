@@ -274,11 +274,12 @@ impl Editor for HardwaveBridgeEditor {
 
             let webview = wry::WebViewBuilder::with_web_context(&mut web_context)
                 .with_additional_browser_args(
-                    "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --disable-gpu"
+                    "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection \
+                     --disable-web-security \
+                     --allow-insecure-localhost \
+                     --disable-gpu"
                 )
-                // Use HTTPS scheme so the page (also HTTPS) can fetch without
-                // mixed-content blocking. Accesses as https://hwpacket.localhost/
-                .with_https_scheme(true)
+                .with_devtools(true)
                 .with_custom_protocol("hwpacket".into(), move |_id, _req| {
                     use std::borrow::Cow;
                     // Drain channel, return the latest packet (or null).
@@ -337,12 +338,11 @@ impl Editor for HardwaveBridgeEditor {
                     // Poll for FFT data via custom protocol.
                     // On Windows, evaluate_script from a Rust background thread
                     // fails silently (ICoreWebView2 is STA-bound). Instead, JS
-                    // fetches https://hwpacket.localhost/ at ~60fps; the wry
+                    // fetches http://hwpacket.localhost/ at ~60fps; the wry
                     // custom protocol handler runs on the UI thread and returns
                     // the latest packet JSON from the crossbeam channel.
-                    // with_https_scheme(true) makes the custom protocol serve
-                    // as https:// so the HTTPS page can fetch it without
-                    // mixed-content blocking.
+                    // --disable-web-security + --allow-insecure-localhost allow
+                    // the HTTPS page to fetch from the http:// custom protocol.
                     (function() {
                         var _polling = false;
                         var _fetchOk = 0;
@@ -360,7 +360,7 @@ impl Editor for HardwaveBridgeEditor {
                             dbg('polling started on ' + window.location.href);
 
                             (function poll() {
-                                fetch('https://hwpacket.localhost/')
+                                fetch('http://hwpacket.localhost/')
                                     .then(function(r) {
                                         _fetchOk++;
                                         return r.json();
