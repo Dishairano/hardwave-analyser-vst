@@ -99,8 +99,8 @@ fn ensure_webview2() {
 }
 
 /// Default editor size.
-const EDITOR_WIDTH: u32 = 900;
-const EDITOR_HEIGHT: u32 = 640;
+const EDITOR_WIDTH: u32 = 1100;
+const EDITOR_HEIGHT: u32 = 700;
 
 /// Base URL for the analyser page.
 const ANALYSER_URL: &str = "https://hardwavestudios.com/vst/analyser";
