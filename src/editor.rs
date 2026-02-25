@@ -161,8 +161,9 @@ enum ParentData {
 unsafe impl Send for ParentData {}
 
 /// Wrapper to make wry::WebView sendable across threads.
-/// SAFETY: We only access the webview from the thread that created it,
-/// or via evaluate_script which WebView2 marshals internally.
+/// SAFETY: On Windows, we create the webview on the DAW's UI thread and only
+/// access it from a background thread for evaluate_script calls, which WebView2
+/// marshals to the UI thread internally.
 struct SendWebView(wry::WebView);
 unsafe impl Send for SendWebView {}
 
@@ -203,183 +204,98 @@ impl Editor for HardwaveBridgeEditor {
         let auth_token = Arc::clone(&self.auth_token);
         let url = self.build_url();
 
-        // On Windows: spawn a dedicated thread with its own COM STA apartment
-        // and Win32 message loop. WebView2 REQUIRES STA and a message pump.
-        // DAWs like FL Studio may have already initialized COM as MTA on
-        // their UI thread, so we can't rely on creating the webview there.
+        // ---------------------------------------------------------------
+        // Windows: create webview on the DAW's UI thread using build()
+        // (NOT build_as_child) so that wry attaches the parent subclass
+        // that handles WM_SIZE, WM_SETFOCUS, and WM_WINDOWPOSCHANGED
+        // (NotifyParentWindowPositionChanged). Without this subclass,
+        // WebView2's DirectComposition layer doesn't know its screen
+        // position → ghosting artifacts.
+        // ---------------------------------------------------------------
         #[cfg(target_os = "windows")]
         {
             ensure_webview2();
 
-            let parent_data = match parent {
-                ParentWindowHandle::Win32Hwnd(h) => h as usize,
-                _ => 0,
-            };
+            let parent_wrapper = RwhWrapper(parent);
+            let ipc_auth_token = Arc::clone(&auth_token);
 
-            let handle = thread::spawn(move || {
-                // Initialize COM as STA on this thread — required for WebView2.
-                #[repr(C)]
-                struct MSG {
-                    hwnd: *mut std::ffi::c_void,
-                    message: u32,
-                    w_param: usize,
-                    l_param: isize,
-                    time: u32,
-                    pt_x: i32,
-                    pt_y: i32,
-                }
-
-                extern "system" {
-                    fn CoInitializeEx(reserved: *mut std::ffi::c_void, coinit: u32) -> i32;
-                    fn CoUninitialize();
-                    fn GetMessageW(
-                        msg: *mut MSG,
-                        hwnd: *mut std::ffi::c_void,
-                        min: u32,
-                        max: u32,
-                    ) -> i32;
-                    fn PeekMessageW(
-                        msg: *mut MSG,
-                        hwnd: *mut std::ffi::c_void,
-                        min: u32,
-                        max: u32,
-                        remove: u32,
-                    ) -> i32;
-                    fn TranslateMessage(msg: *const MSG) -> i32;
-                    fn DispatchMessageW(msg: *const MSG) -> isize;
-                    fn PostThreadMessageW(
-                        thread_id: u32,
-                        msg: u32,
-                        wparam: usize,
-                        lparam: isize,
-                    ) -> i32;
-                    fn GetCurrentThreadId() -> u32;
-                    fn SetTimer(
-                        hwnd: *mut std::ffi::c_void,
-                        id: usize,
-                        elapse: u32,
-                        func: *const std::ffi::c_void,
-                    ) -> usize;
-                    fn KillTimer(hwnd: *mut std::ffi::c_void, id: usize) -> i32;
-                }
-
-                const COINIT_APARTMENTTHREADED: u32 = 0x2;
-                const PM_REMOVE: u32 = 0x0001;
-                const WM_QUIT: u32 = 0x0012;
-                const WM_TIMER: u32 = 0x0113;
-
-                unsafe { CoInitializeEx(std::ptr::null_mut(), COINIT_APARTMENTTHREADED) };
-
-                // Reconstruct the parent handle for wry.
-                let reconstructed =
-                    ParentWindowHandle::Win32Hwnd(parent_data as *mut std::ffi::c_void);
-                let parent_wrapper = RwhWrapper(reconstructed);
-
-                let ipc_auth_token = Arc::clone(&auth_token);
-                let webview = wry::WebViewBuilder::new()
-                    .with_bounds(wry::Rect {
-                        position: wry::dpi::LogicalPosition::new(0, 0).into(),
-                        size: wry::dpi::LogicalSize::new(EDITOR_WIDTH, EDITOR_HEIGHT).into(),
-                    })
-                    .with_transparent(false)
-                    .with_background_color((10, 10, 11, 255))
-                    .with_visible(true)
-                    .with_focused(true)
-                    .with_url(&url)
-                    .with_ipc_handler(move |req: wry::http::Request<String>| {
-                        let msg = req.body().as_str();
-                        if let Some(token) = msg.strip_prefix("saveToken:") {
-                            let token = token.trim().to_string();
-                            auth::save_token(&token);
-                            *ipc_auth_token.lock() = Some(token);
+            // build() creates the webview as a WS_CHILD of the parent HWND,
+            // sizes it to fill the parent, AND subclasses the parent to
+            // forward WM_SIZE/WM_WINDOWPOSCHANGED to the WebView2 controller.
+            let webview = wry::WebViewBuilder::new()
+                .with_transparent(false)
+                .with_background_color((10, 10, 11, 255))
+                .with_visible(true)
+                .with_focused(true)
+                .with_url(&url)
+                .with_ipc_handler(move |req: wry::http::Request<String>| {
+                    let msg = req.body().as_str();
+                    if let Some(token) = msg.strip_prefix("saveToken:") {
+                        let token = token.trim().to_string();
+                        auth::save_token(&token);
+                        *ipc_auth_token.lock() = Some(token);
+                    }
+                })
+                .with_initialization_script(
+                    r#"
+                    window.__HARDWAVE_VST = true;
+                    window.__hardwave = {
+                        saveToken: function(token) {
+                            window.ipc.postMessage('saveToken:' + token);
                         }
-                    })
-                    .with_initialization_script(
-                        r#"
-                        window.__HARDWAVE_VST = true;
-                        window.__hardwave = {
-                            saveToken: function(token) {
-                                window.ipc.postMessage('saveToken:' + token);
-                            }
-                        };
-                        "#,
-                    )
-                    .build_as_child(&parent_wrapper);
+                    };
+                    "#,
+                )
+                .build(&parent_wrapper);
 
-                match webview {
-                    Ok(webview) => {
-                        // Set up a 16ms timer for packet injection (~60Hz).
-                        let _timer_id = unsafe { SetTimer(std::ptr::null_mut(), 1, 16, std::ptr::null()) };
+            match webview {
+                Ok(wv) => {
+                    let send_wv = Arc::new(Mutex::new(SendWebView(wv)));
+                    let send_wv_clone = Arc::clone(&send_wv);
 
-                        // Run a proper Win32 message loop. WebView2 needs this to
-                        // process its internal async operations and render.
-                        unsafe {
-                            let mut msg = std::mem::zeroed::<MSG>();
-                            loop {
-                                // Check if we should shut down.
-                                if !running_clone.load(Ordering::Relaxed) {
-                                    break;
-                                }
-
-                                // Process all pending messages (non-blocking).
-                                while PeekMessageW(
-                                    &mut msg,
-                                    std::ptr::null_mut(),
-                                    0,
-                                    0,
-                                    PM_REMOVE,
-                                ) != 0
-                                {
-                                    if msg.message == WM_QUIT {
-                                        running_clone.store(false, Ordering::Relaxed);
-                                        break;
-                                    }
-                                    TranslateMessage(&msg);
-                                    DispatchMessageW(&msg);
-                                }
-
-                                if !running_clone.load(Ordering::Relaxed) {
-                                    break;
-                                }
-
-                                // Inject latest FFT packet into the webview.
-                                let mut latest: Option<AudioPacket> = None;
-                                while let Ok(packet) = packet_rx.try_recv() {
-                                    latest = Some(packet);
-                                }
-
-                                if let Some(packet) = latest {
-                                    let json =
-                                        serde_json::to_string(&packet).unwrap_or_default();
-                                    let js = format!(
-                                        "window.__onAudioPacket && window.__onAudioPacket({})",
-                                        json
-                                    );
-                                    let _ = webview.evaluate_script(&js);
-                                }
-
-                                // Sleep briefly to avoid busy-waiting, but keep
-                                // the message loop responsive.
-                                thread::sleep(Duration::from_millis(4));
+                    // Background thread only for injecting FFT packets.
+                    // evaluate_script marshals to the UI thread internally.
+                    let _injector = thread::spawn(move || {
+                        while running_clone.load(Ordering::Relaxed) {
+                            let mut latest: Option<AudioPacket> = None;
+                            while let Ok(packet) = packet_rx.try_recv() {
+                                latest = Some(packet);
                             }
 
-                            KillTimer(std::ptr::null_mut(), _timer_id);
-                            CoUninitialize();
-                        }
-                    }
-                    Err(e) => {
-                        nih_log!("Failed to create webview: {}", e);
-                        unsafe { CoUninitialize() };
-                    }
-                }
-            });
+                            if let Some(packet) = latest {
+                                let json = serde_json::to_string(&packet).unwrap_or_default();
+                                let js = format!(
+                                    "window.__onAudioPacket && window.__onAudioPacket({})",
+                                    json
+                                );
+                                let wv = send_wv_clone.lock();
+                                let _ = wv.0.evaluate_script(&js);
+                            }
 
-            Box::new(EditorHandle {
-                _thread: Some(handle),
-                running,
-            })
+                            thread::sleep(Duration::from_millis(16));
+                        }
+                    });
+
+                    Box::new(EditorHandle {
+                        _thread: None,
+                        _webview: Some(send_wv),
+                        running,
+                    })
+                }
+                Err(e) => {
+                    nih_log!("Failed to create webview: {}", e);
+                    Box::new(EditorHandle {
+                        _thread: None,
+                        _webview: None,
+                        running,
+                    })
+                }
+            }
         }
 
+        // ---------------------------------------------------------------
+        // Linux / macOS: spawn thread with GTK/platform init
+        // ---------------------------------------------------------------
         #[cfg(not(target_os = "windows"))]
         {
             let parent_data = match parent {
@@ -471,6 +387,7 @@ impl Editor for HardwaveBridgeEditor {
 
             Box::new(EditorHandle {
                 _thread: Some(handle),
+                _webview: None,
                 running,
             })
         }
@@ -492,6 +409,7 @@ impl Editor for HardwaveBridgeEditor {
 /// Handle returned from `spawn()`. When dropped, the editor closes.
 struct EditorHandle {
     _thread: Option<thread::JoinHandle<()>>,
+    _webview: Option<Arc<Mutex<SendWebView>>>,
     running: Arc<AtomicBool>,
 }
 
