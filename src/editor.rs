@@ -292,12 +292,23 @@ impl Editor for HardwaveBridgeEditor {
             ensure_webview2();
             debug_log("WebView2 check done, creating webview...");
 
+            // Use a writable data directory for WebView2. The default is the
+            // executable's folder (FL Studio's Program Files) which is not
+            // writable → E_ACCESSDENIED.
+            let data_dir = dirs::data_local_dir()
+                .unwrap_or_else(std::env::temp_dir)
+                .join("Hardwave")
+                .join("WebView2");
+            debug_log(&format!("WebView2 data dir = {:?}", data_dir));
+            let _ = std::fs::create_dir_all(&data_dir);
+            let mut web_context = wry::WebContext::new(Some(data_dir));
+
             let parent_wrapper = RwhWrapper(parent);
             let ipc_auth_token = Arc::clone(&auth_token);
 
             debug_log(&format!("URL = {}", url));
 
-            let webview = wry::WebViewBuilder::new()
+            let webview = wry::WebViewBuilder::with_web_context(&mut web_context)
                 .with_additional_browser_args(
                     "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --disable-gpu"
                 )
@@ -369,6 +380,7 @@ impl Editor for HardwaveBridgeEditor {
                     Box::new(EditorHandle {
                         _thread: None,
                         _webview: Some(send_wv),
+                        _web_context: Some(SendWebContext(web_context)),
                         running,
                     })
                 }
@@ -377,6 +389,7 @@ impl Editor for HardwaveBridgeEditor {
                     Box::new(EditorHandle {
                         _thread: None,
                         _webview: None,
+                        _web_context: None,
                         running,
                     })
                 }
@@ -478,6 +491,7 @@ impl Editor for HardwaveBridgeEditor {
             Box::new(EditorHandle {
                 _thread: Some(handle),
                 _webview: None,
+                _web_context: None,
                 running,
             })
         }
@@ -496,10 +510,16 @@ impl Editor for HardwaveBridgeEditor {
     fn param_values_changed(&self) {}
 }
 
+/// Wrapper to make wry::WebContext sendable across threads.
+struct SendWebContext(wry::WebContext);
+unsafe impl Send for SendWebContext {}
+
 /// Handle returned from `spawn()`. When dropped, the editor closes.
 struct EditorHandle {
     _thread: Option<thread::JoinHandle<()>>,
     _webview: Option<Arc<Mutex<SendWebView>>>,
+    /// Must outlive the webview.
+    _web_context: Option<SendWebContext>,
     running: Arc<AtomicBool>,
 }
 
