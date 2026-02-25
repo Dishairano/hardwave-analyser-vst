@@ -18,11 +18,22 @@ pub fn load_token() -> Option<String> {
 }
 
 /// Save a JWT token to disk.
+///
+/// On Unix the file is created with mode 0o600 (owner read/write only) so
+/// other users on the system cannot read the token.
 pub fn save_token(token: &str) {
     if let Some(path) = token_path() {
         if let Some(parent) = path.parent() {
             let _ = fs::create_dir_all(parent);
         }
-        let _ = fs::write(path, token);
+        let _ = fs::write(&path, token);
+
+        // Restrict permissions to owner-only on Unix.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = fs::Permissions::from_mode(0o600);
+            let _ = fs::set_permissions(&path, perms);
+        }
     }
 }

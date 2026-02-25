@@ -86,9 +86,12 @@ impl AudioPacket {
         }
     }
 
-    /// Serialize the packet to binary format
+    /// Serialize the packet to binary format.
+    ///
+    /// Returns an empty `Vec` on the (practically impossible) serialization
+    /// error rather than panicking, which would crash the DAW host process.
     pub fn to_bytes(&self) -> Vec<u8> {
-        bincode::serialize(self).expect("Failed to serialize packet")
+        bincode::serialize(self).unwrap_or_default()
     }
 
     /// Deserialize a packet from binary format
