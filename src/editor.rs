@@ -439,6 +439,9 @@ impl Editor for HardwaveBridgeEditor {
                 port = server_port
             );
 
+            #[allow(unused_imports)]
+            use wry::WebViewBuilderExtWindows as _;
+
             let webview = wry::WebViewBuilder::with_web_context(&mut web_context)
                 .with_additional_browser_args(
                     "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection \
