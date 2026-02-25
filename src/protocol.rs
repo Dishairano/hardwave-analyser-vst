@@ -1,13 +1,9 @@
 //! Binary protocol for audio data transmission
-//!
-//! Packet format is designed to be compact (~536 bytes per packet)
-//! and efficiently deserializable on the receiving end.
 
 use serde::{Deserialize, Serialize};
-use serde_big_array::BigArray;
 
-/// Number of frequency bands in FFT analysis
-pub const NUM_BANDS: usize = 64;
+/// Number of raw FFT magnitude bins (FFT_SIZE / 2)
+pub const NUM_BINS: usize = 2048;
 
 /// Packet type identifiers
 pub const PACKET_TYPE_FFT: u8 = 0;
@@ -25,13 +21,11 @@ pub struct AudioPacket {
     /// Timestamp in milliseconds since plugin start
     pub timestamp_ms: u64,
 
-    /// Left channel FFT bands in dB (-100 to 0)
-    #[serde(with = "BigArray")]
-    pub left_bands: [f32; NUM_BANDS],
+    /// Left channel raw FFT magnitude bins in dB (-100 to 0), length = NUM_BINS
+    pub left_bins: Vec<f32>,
 
-    /// Right channel FFT bands in dB (-100 to 0)
-    #[serde(with = "BigArray")]
-    pub right_bands: [f32; NUM_BANDS],
+    /// Right channel raw FFT magnitude bins in dB (-100 to 0), length = NUM_BINS
+    pub right_bins: Vec<f32>,
 
     /// Left channel peak level in dB
     pub left_peak: f32,
@@ -51,8 +45,8 @@ impl AudioPacket {
     pub fn new_fft(
         sample_rate: u32,
         timestamp_ms: u64,
-        left_bands: [f32; NUM_BANDS],
-        right_bands: [f32; NUM_BANDS],
+        left_bins: Vec<f32>,
+        right_bins: Vec<f32>,
         left_peak: f32,
         right_peak: f32,
         left_rms: f32,
@@ -62,8 +56,8 @@ impl AudioPacket {
             packet_type: PACKET_TYPE_FFT,
             sample_rate,
             timestamp_ms,
-            left_bands,
-            right_bands,
+            left_bins,
+            right_bins,
             left_peak,
             right_peak,
             left_rms,
@@ -77,8 +71,8 @@ impl AudioPacket {
             packet_type: PACKET_TYPE_HEARTBEAT,
             sample_rate,
             timestamp_ms,
-            left_bands: [0.0; NUM_BANDS],
-            right_bands: [0.0; NUM_BANDS],
+            left_bins: vec![0.0; NUM_BINS],
+            right_bins: vec![0.0; NUM_BINS],
             left_peak: -100.0,
             right_peak: -100.0,
             left_rms: 0.0,
@@ -106,8 +100,8 @@ mod tests {
         let packet = AudioPacket::new_fft(
             48000,
             12345,
-            [-60.0; NUM_BANDS],
-            [-60.0; NUM_BANDS],
+            vec![-60.0; NUM_BINS],
+            vec![-60.0; NUM_BINS],
             -3.0,
             -3.0,
             0.5,
@@ -120,6 +114,7 @@ mod tests {
         assert_eq!(decoded.packet_type, PACKET_TYPE_FFT);
         assert_eq!(decoded.sample_rate, 48000);
         assert_eq!(decoded.timestamp_ms, 12345);
+        assert_eq!(decoded.left_bins.len(), NUM_BINS);
     }
 
     #[test]
@@ -127,8 +122,8 @@ mod tests {
         let packet = AudioPacket::new_fft(
             48000,
             0,
-            [-60.0; NUM_BANDS],
-            [-60.0; NUM_BANDS],
+            vec![-60.0; NUM_BINS],
+            vec![-60.0; NUM_BINS],
             -3.0,
             -3.0,
             0.5,
@@ -136,7 +131,8 @@ mod tests {
         );
 
         let bytes = packet.to_bytes();
-        // Should be around 536 bytes
-        assert!(bytes.len() < 600, "Packet too large: {} bytes", bytes.len());
+        // 2048 bins × 2 channels × 4 bytes + overhead ≈ 16.4 KB
+        assert!(bytes.len() < 20_000, "Packet too large: {} bytes", bytes.len());
+        println!("Packet size: {} bytes", bytes.len());
     }
 }

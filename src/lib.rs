@@ -235,9 +235,9 @@ impl HardwaveBridge {
 
     /// Process and send FFT data
     fn send_fft_data(&mut self) {
-        // Process FFT for both channels
-        let left_bands = self.fft_left.process(&self.buffer_left, self.sample_rate);
-        let right_bands = self.fft_right.process(&self.buffer_right, self.sample_rate);
+        // Process FFT for both channels → raw magnitude bins in dB
+        let left_bins = self.fft_left.process(&self.buffer_left, self.sample_rate);
+        let right_bins = self.fft_right.process(&self.buffer_right, self.sample_rate);
 
         // Calculate levels
         let (left_peak, left_rms) = FftProcessor::calculate_levels(&self.buffer_left);
@@ -249,16 +249,16 @@ impl HardwaveBridge {
         // Log first 3 packets so we know FFT is running
         if timestamp_ms < 3000 || timestamp_ms % 10000 < 100 {
             Self::debug_log(&format!(
-                "send_fft_data: ts={}ms sr={} left_peak={:.1}",
-                timestamp_ms, self.sample_rate as u32, left_peak
+                "send_fft_data: ts={}ms sr={} left_peak={:.1} bins={}",
+                timestamp_ms, self.sample_rate as u32, left_peak, left_bins.len()
             ));
         }
 
         let packet = AudioPacket::new_fft(
             self.sample_rate as u32,
             timestamp_ms,
-            left_bands,
-            right_bands,
+            left_bins,
+            right_bins,
             left_peak,
             right_peak,
             left_rms,
