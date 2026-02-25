@@ -50,8 +50,11 @@ impl FftProcessor {
         let fft = self.planner.plan_fft_forward(FFT_SIZE);
         fft.process(&mut self.fft_buffer);
 
-        // Convert bins to dB (amplitude-normalised by FFT size, ×2 for single-sided)
-        let scale = 2.0 / FFT_SIZE as f32;
+        // Convert bins to dB.
+        // Hann window coherent gain = 0.5, so the correct amplitude scale is:
+        //   2 / (FFT_SIZE * coherent_gain) = 4 / FFT_SIZE
+        // Without this correction a 0 dBFS sine reads −6 dB.
+        let scale = 4.0 / FFT_SIZE as f32;
         (0..NUM_BINS)
             .map(|i| {
                 let mag = self.fft_buffer[i].norm() * scale;
