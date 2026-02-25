@@ -17,6 +17,24 @@ use wry::WebViewBuilderExtWindows;
 use crate::auth;
 use crate::protocol::AudioPacket;
 
+/// Write a debug line to %TEMP%\hardwave-debug.log (Windows) or /tmp/hardwave-debug.log.
+#[allow(unused)]
+fn debug_log(msg: &str) {
+    use std::io::Write;
+    let path = {
+        let mut p = std::env::temp_dir();
+        p.push("hardwave-debug.log");
+        p
+    };
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let _ = writeln!(f, "[{}] {}", now, msg);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // WebView2 auto-install (Windows only)
 // ---------------------------------------------------------------------------
@@ -216,13 +234,12 @@ impl Editor for HardwaveBridgeEditor {
         // ---------------------------------------------------------------
         #[cfg(target_os = "windows")]
         {
-            // Log parent HWND info
             let parent_hwnd = match parent {
                 ParentWindowHandle::Win32Hwnd(h) => h as usize,
                 _ => 0,
             };
-            nih_log!("[hardwave] spawn() called, parent HWND = 0x{:X}", parent_hwnd);
-            nih_log!("[hardwave] current thread id = {:?}", std::thread::current().id());
+            debug_log(&format!("spawn() called, parent HWND = 0x{:X}", parent_hwnd));
+            debug_log(&format!("current thread id = {:?}", std::thread::current().id()));
 
             // Query COM apartment type on this thread
             {
@@ -233,9 +250,8 @@ impl Editor for HardwaveBridgeEditor {
                 const COINIT_APARTMENTTHREADED: u32 = 0x2;
                 let hr = unsafe { CoInitializeEx(std::ptr::null_mut(), COINIT_APARTMENTTHREADED) };
                 // S_OK=0, S_FALSE=1 (already STA), RPC_E_CHANGED_MODE=0x80010106 (MTA)
-                nih_log!("[hardwave] CoInitializeEx(STA) returned 0x{:X}", hr as u32);
+                debug_log(&format!("CoInitializeEx(STA) returned 0x{:X}", hr as u32));
                 if hr == 0 || hr == 1 {
-                    // We successfully entered STA (or were already in it), undo our call
                     unsafe { CoUninitialize() };
                 }
             }
@@ -261,26 +277,25 @@ impl Editor for HardwaveBridgeEditor {
                 let mut rect = [0i32; 4];
                 unsafe { GetClientRect(hwnd_ptr, &mut rect) };
 
-                nih_log!("[hardwave] IsWindow={}, IsWindowVisible={}", is_window, is_visible);
-                nih_log!("[hardwave] parent style=0x{:08X}, exstyle=0x{:08X}", style, exstyle);
-                nih_log!("[hardwave] parent client rect: {}x{}", rect[2] - rect[0], rect[3] - rect[1]);
-                nih_log!("[hardwave] grandparent HWND = 0x{:X}", grandparent as usize);
+                debug_log(&format!("IsWindow={}, IsWindowVisible={}", is_window, is_visible));
+                debug_log(&format!("parent style=0x{:08X}, exstyle=0x{:08X}", style, exstyle));
+                debug_log(&format!("parent client rect: {}x{}", rect[2] - rect[0], rect[3] - rect[1]));
+                debug_log(&format!("grandparent HWND = 0x{:X}", grandparent as usize));
 
-                // Decode key style bits
-                let is_child = style & 0x40000000 != 0; // WS_CHILD
-                let has_clipchildren = style & 0x02000000 != 0; // WS_CLIPCHILDREN
-                let has_clipsiblings = style & 0x04000000 != 0; // WS_CLIPSIBLINGS
-                nih_log!("[hardwave] WS_CHILD={}, WS_CLIPCHILDREN={}, WS_CLIPSIBLINGS={}",
-                    is_child, has_clipchildren, has_clipsiblings);
+                let is_child = style & 0x40000000 != 0;
+                let has_clipchildren = style & 0x02000000 != 0;
+                let has_clipsiblings = style & 0x04000000 != 0;
+                debug_log(&format!("WS_CHILD={}, WS_CLIPCHILDREN={}, WS_CLIPSIBLINGS={}",
+                    is_child, has_clipchildren, has_clipsiblings));
             }
 
             ensure_webview2();
-            nih_log!("[hardwave] WebView2 check done, creating webview...");
+            debug_log("WebView2 check done, creating webview...");
 
             let parent_wrapper = RwhWrapper(parent);
             let ipc_auth_token = Arc::clone(&auth_token);
 
-            nih_log!("[hardwave] URL = {}", url);
+            debug_log(&format!("URL = {}", url));
 
             let webview = wry::WebViewBuilder::new()
                 .with_additional_browser_args(
@@ -313,16 +328,15 @@ impl Editor for HardwaveBridgeEditor {
 
             match webview {
                 Ok(wv) => {
-                    nih_log!("[hardwave] WebView created successfully!");
+                    debug_log("WebView created successfully!");
 
-                    // Query webview bounds after creation
                     match wv.bounds() {
                         Ok(bounds) => {
-                            nih_log!("[hardwave] webview bounds: pos={:?}, size={:?}",
-                                bounds.position, bounds.size);
+                            debug_log(&format!("webview bounds: pos={:?}, size={:?}",
+                                bounds.position, bounds.size));
                         }
                         Err(e) => {
-                            nih_log!("[hardwave] failed to query bounds: {}", e);
+                            debug_log(&format!("failed to query bounds: {}", e));
                         }
                     }
 
@@ -350,7 +364,7 @@ impl Editor for HardwaveBridgeEditor {
                         }
                     });
 
-                    nih_log!("[hardwave] Editor spawn complete, injector thread started");
+                    debug_log("Editor spawn complete, injector thread started");
 
                     Box::new(EditorHandle {
                         _thread: None,
@@ -359,7 +373,7 @@ impl Editor for HardwaveBridgeEditor {
                     })
                 }
                 Err(e) => {
-                    nih_log!("[hardwave] FAILED to create webview: {}", e);
+                    debug_log(&format!("FAILED to create webview: {}", e));
                     Box::new(EditorHandle {
                         _thread: None,
                         _webview: None,
@@ -491,7 +505,7 @@ struct EditorHandle {
 
 impl Drop for EditorHandle {
     fn drop(&mut self) {
-        nih_log!("[hardwave] EditorHandle dropped, closing editor");
+        debug_log("EditorHandle dropped, closing editor");
         self.running.store(false, Ordering::Relaxed);
     }
 }
