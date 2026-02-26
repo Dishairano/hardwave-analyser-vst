@@ -26,18 +26,18 @@ jobs:
           targets: x86_64-unknown-linux-gnu
 
       - name: Build
-        run: cargo xtask bundle hardwave-bridge --release
+        run: cargo xtask bundle hardwave-analyser --release
 
       - name: Package
         run: |
           cd target/bundled
-          tar -czvf hardwave-bridge-linux-x64.tar.gz hardwave-bridge.vst3 hardwave-bridge.clap
+          tar -czvf hardwave-analyser-linux-x64.tar.gz hardwave-analyser.vst3 hardwave-analyser.clap
 
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: hardwave-bridge-linux-x64
-          path: target/bundled/hardwave-bridge-linux-x64.tar.gz
+          name: hardwave-analyser-linux-x64
+          path: target/bundled/hardwave-analyser-linux-x64.tar.gz
 
   build-windows:
     runs-on: [self-hosted, linux, x64]
@@ -54,27 +54,27 @@ jobs:
         run: cargo install cargo-xwin --locked
 
       - name: Build (MSVC cross-compile, with GUI)
-        run: cargo xwin build --release --target x86_64-pc-windows-msvc -p hardwave-bridge
+        run: cargo xwin build --release --target x86_64-pc-windows-msvc -p hardwave-analyser
 
       - name: Bundle VST3 and CLAP
         run: |
-          DLL=target/x86_64-pc-windows-msvc/release/hardwave_bridge.dll
+          DLL=target/x86_64-pc-windows-msvc/release/hardwave_analyser.dll
           # VST3 bundle
-          mkdir -p target/bundled/hardwave-bridge.vst3/Contents/x86_64-win
-          cp "$DLL" target/bundled/hardwave-bridge.vst3/Contents/x86_64-win/hardwave-bridge.vst3
+          mkdir -p target/bundled/hardwave-analyser.vst3/Contents/x86_64-win
+          cp "$DLL" target/bundled/hardwave-analyser.vst3/Contents/x86_64-win/hardwave-analyser.vst3
           # CLAP bundle
-          cp "$DLL" target/bundled/hardwave-bridge.clap
+          cp "$DLL" target/bundled/hardwave-analyser.clap
 
       - name: Package
         run: |
           cd target/bundled
-          zip -r hardwave-bridge-windows-x64.zip hardwave-bridge.vst3 hardwave-bridge.clap
+          zip -r hardwave-analyser-windows-x64.zip hardwave-analyser.vst3 hardwave-analyser.clap
 
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: hardwave-bridge-windows-x64
-          path: target/bundled/hardwave-bridge-windows-x64.zip
+          name: hardwave-analyser-windows-x64
+          path: target/bundled/hardwave-analyser-windows-x64.zip
 
   release:
     needs: [build-linux, build-windows]
@@ -107,24 +107,24 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           tag_name: ${{ steps.version.outputs.version }}
-          name: Hardwave Analyser VST ${{ steps.version.outputs.version }}
+          name: Hardwave Analyser ${{ steps.version.outputs.version }}
           draft: false
           prerelease: false
           generate_release_notes: true
           files: |
-            artifacts/hardwave-bridge-linux-x64/*.tar.gz
-            artifacts/hardwave-bridge-windows-x64/*.zip
+            artifacts/hardwave-analyser-linux-x64/*.tar.gz
+            artifacts/hardwave-analyser-windows-x64/*.zip
           body: |
-            ## Hardwave Analyser VST ${{ steps.version.outputs.version }}
+            ## Hardwave Analyser ${{ steps.version.outputs.version }}
 
-            VST3/CLAP audio bridge plugin — powered by Hardwave Studio.
+            VST3/CLAP spectrum analyser plugin — powered by Hardwave Studios.
 
             ### Downloads
 
             | Platform | File |
             |----------|------|
-            | Linux x64 | `hardwave-bridge-linux-x64.tar.gz` |
-            | Windows x64 | `hardwave-bridge-windows-x64.zip` |
+            | Linux x64 | `hardwave-analyser-linux-x64.tar.gz` |
+            | Windows x64 | `hardwave-analyser-windows-x64.zip` |
 
             > macOS builds coming soon.
 
@@ -132,15 +132,15 @@ jobs:
 
             **Windows:**
             1. Extract the zip
-            2. Copy `hardwave-bridge.vst3` folder to `C:\Program Files\Common Files\VST3\`
-            3. Copy `hardwave-bridge.clap` to `C:\Program Files\Common Files\CLAP\`
+            2. Copy `hardwave-analyser.vst3` folder to `C:\Program Files\Common Files\VST3\`
+            3. Copy `hardwave-analyser.clap` to `C:\Program Files\Common Files\CLAP\`
 
             **Linux:**
-            1. Extract: `tar -xzf hardwave-bridge-linux-x64.tar.gz`
+            1. Extract: `tar -xzf hardwave-analyser-linux-x64.tar.gz`
             2. Copy to `~/.vst3/` and `~/.clap/`
 
             ### Usage
 
-            1. Add **Hardwave Bridge** to your DAW's master channel
-            2. The plugin opens an embedded analyser (requires internet + Hardwave Pro subscription)
+            1. Add **Hardwave Analyser** to any channel in your DAW
+            2. The plugin opens an embedded spectrum analyser (requires Hardwave Pro subscription)
             3. Log in once — credentials are saved locally

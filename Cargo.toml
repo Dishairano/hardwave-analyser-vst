@@ -2,8 +2,8 @@
 members = ["xtask"]
 
 [package]
-name = "hardwave-bridge"
-version = "0.1.0"
+name = "hardwave-analyser"
+version = "0.5.0"
 edition = "2021"
 authors = ["Hardwave Studios"]
 license = "MIT"

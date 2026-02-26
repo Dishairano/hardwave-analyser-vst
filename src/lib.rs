@@ -1,4 +1,4 @@
-//! Hardwave Bridge - VST3/CLAP plugin for streaming audio to Hardwave Suite
+//! Hardwave Analyser - VST3/CLAP plugin for streaming audio to Hardwave Suite
 //!
 //! This plugin captures audio from the DAW and streams FFT data via WebSocket
 //! to the Hardwave Suite desktop application for real-time analysis.
@@ -19,13 +19,13 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use fft::{FftProcessor, FFT_SIZE};
-use params::HardwaveBridgeParams;
+use params::HardwaveAnalyserParams;
 use protocol::AudioPacket;
 use websocket::WebSocketClient;
 
 /// Main plugin struct
-pub struct HardwaveBridge {
-    params: Arc<HardwaveBridgeParams>,
+pub struct HardwaveAnalyser {
+    params: Arc<HardwaveAnalyserParams>,
 
     /// WebSocket client for streaming to the desktop app
     ws_client: WebSocketClient,
@@ -35,7 +35,7 @@ pub struct HardwaveBridge {
 
     /// Editor instance (created once, reused)
     #[cfg(feature = "gui")]
-    editor_instance: Option<editor::HardwaveBridgeEditor>,
+    editor_instance: Option<editor::HardwaveAnalyserEditor>,
 
     /// FFT processor for left channel
     fft_left: FftProcessor,
@@ -65,17 +65,17 @@ pub struct HardwaveBridge {
     last_port: i32,
 }
 
-impl Default for HardwaveBridge {
+impl Default for HardwaveAnalyser {
     fn default() -> Self {
         let (editor_packet_tx, _editor_packet_rx) = bounded::<AudioPacket>(32);
 
         Self {
-            params: Arc::new(HardwaveBridgeParams::default()),
+            params: Arc::new(HardwaveAnalyserParams::default()),
             ws_client: WebSocketClient::new(),
             editor_packet_tx,
             #[cfg(feature = "gui")]
             editor_instance: {
-                Some(editor::HardwaveBridgeEditor::new(_editor_packet_rx))
+                Some(editor::HardwaveAnalyserEditor::new(_editor_packet_rx))
             },
             fft_left: FftProcessor::new(),
             fft_right: FftProcessor::new(),
@@ -90,8 +90,8 @@ impl Default for HardwaveBridge {
     }
 }
 
-impl Plugin for HardwaveBridge {
-    const NAME: &'static str = "Hardwave Bridge";
+impl Plugin for HardwaveAnalyser {
+    const NAME: &'static str = "Hardwave Analyser";
     const VENDOR: &'static str = "Hardwave Studios";
     const URL: &'static str = "https://hardwave.studio";
     const EMAIL: &'static str = "support@hardwave.studio";
@@ -221,7 +221,7 @@ impl Plugin for HardwaveBridge {
     }
 }
 
-impl HardwaveBridge {
+impl HardwaveAnalyser {
     /// Write a line to the same debug log as editor.rs
     fn debug_log(msg: &str) {
         use std::io::Write;
@@ -281,11 +281,11 @@ impl HardwaveBridge {
     }
 }
 
-impl ClapPlugin for HardwaveBridge {
-    const CLAP_ID: &'static str = "studio.hardwave.bridge";
+impl ClapPlugin for HardwaveAnalyser {
+    const CLAP_ID: &'static str = "studio.hardwave.analyser";
     const CLAP_DESCRIPTION: Option<&'static str> =
         Some("Stream audio to Hardwave Suite for real-time analysis");
-    const CLAP_MANUAL_URL: Option<&'static str> = Some("https://hardwave.studio/docs/bridge");
+    const CLAP_MANUAL_URL: Option<&'static str> = Some("https://hardwave.studio/docs/analyser");
     const CLAP_SUPPORT_URL: Option<&'static str> = Some("https://hardwave.studio/support");
     const CLAP_FEATURES: &'static [ClapFeature] = &[
         ClapFeature::AudioEffect,
@@ -294,8 +294,8 @@ impl ClapPlugin for HardwaveBridge {
     ];
 }
 
-impl Vst3Plugin for HardwaveBridge {
-    const VST3_CLASS_ID: [u8; 16] = *b"HardwaveBridge00";
+impl Vst3Plugin for HardwaveAnalyser {
+    const VST3_CLASS_ID: [u8; 16] = *b"HardwaveAnalyser";
     const VST3_SUBCATEGORIES: &'static [Vst3SubCategory] = &[
         Vst3SubCategory::Fx,
         Vst3SubCategory::Analyzer,
@@ -303,5 +303,5 @@ impl Vst3Plugin for HardwaveBridge {
     ];
 }
 
-nih_export_clap!(HardwaveBridge);
-nih_export_vst3!(HardwaveBridge);
+nih_export_clap!(HardwaveAnalyser);
+nih_export_vst3!(HardwaveAnalyser);

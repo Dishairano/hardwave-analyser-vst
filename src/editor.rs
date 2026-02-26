@@ -1,4 +1,4 @@
-//! Webview-based editor for Hardwave Bridge.
+//! Webview-based editor for Hardwave Analyser.
 //!
 //! Embeds a wry `WebView` that loads the Hardwave analyser page.
 //! On Windows, FFT data is delivered via a local HTTP server (TcpListener
@@ -188,13 +188,13 @@ unsafe impl Send for ParentData {}
 struct SendWebView(wry::WebView);
 unsafe impl Send for SendWebView {}
 
-pub struct HardwaveBridgeEditor {
+pub struct HardwaveAnalyserEditor {
     packet_rx: Receiver<AudioPacket>,
     auth_token: Arc<Mutex<Option<String>>>,
     size: (u32, u32),
 }
 
-impl HardwaveBridgeEditor {
+impl HardwaveAnalyserEditor {
     pub fn new(packet_rx: Receiver<AudioPacket>) -> Self {
         let token = auth::load_token();
         Self {
@@ -304,7 +304,7 @@ fn start_packet_server(
 
 // ---------------------------------------------------------------------------
 
-impl Editor for HardwaveBridgeEditor {
+impl Editor for HardwaveAnalyserEditor {
     fn spawn(
         &self,
         parent: ParentWindowHandle,

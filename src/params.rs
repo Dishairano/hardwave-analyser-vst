@@ -1,11 +1,11 @@
-//! Plugin parameters for Hardwave Bridge
+//! Plugin parameters for Hardwave Analyser
 
 use nih_plug::prelude::*;
 use std::sync::Arc;
 
 /// Plugin parameters
 #[derive(Params)]
-pub struct HardwaveBridgeParams {
+pub struct HardwaveAnalyserParams {
     /// Enable/disable streaming
     #[id = "enabled"]
     pub enabled: BoolParam,
@@ -15,7 +15,7 @@ pub struct HardwaveBridgeParams {
     pub port: IntParam,
 }
 
-impl Default for HardwaveBridgeParams {
+impl Default for HardwaveAnalyserParams {
     fn default() -> Self {
         Self {
             enabled: BoolParam::new("Enabled", true),
