@@ -254,6 +254,19 @@ impl HardwaveAnalyser {
             ));
         }
 
+        // Extract oscilloscope waveform: last WAVE_SIZE samples from ring buffer
+        use protocol::WAVE_SIZE;
+        let left_wave = if self.buffer_left.len() >= WAVE_SIZE {
+            self.buffer_left[self.buffer_left.len() - WAVE_SIZE..].to_vec()
+        } else {
+            vec![0.0_f32; WAVE_SIZE]
+        };
+        let right_wave = if self.buffer_right.len() >= WAVE_SIZE {
+            self.buffer_right[self.buffer_right.len() - WAVE_SIZE..].to_vec()
+        } else {
+            vec![0.0_f32; WAVE_SIZE]
+        };
+
         let packet = AudioPacket::new_fft(
             self.sample_rate as u32,
             timestamp_ms,
@@ -263,6 +276,8 @@ impl HardwaveAnalyser {
             right_peak,
             left_rms,
             right_rms,
+            left_wave,
+            right_wave,
         );
 
         // Send to WebSocket (desktop app)

@@ -5,6 +5,9 @@ use serde::{Deserialize, Serialize};
 /// Number of raw FFT magnitude bins (FFT_SIZE / 2)
 pub const NUM_BINS: usize = 2048;
 
+/// Number of time-domain samples sent per packet for the oscilloscope
+pub const WAVE_SIZE: usize = 512;
+
 /// Packet type identifiers
 pub const PACKET_TYPE_FFT: u8 = 0;
 pub const PACKET_TYPE_HEARTBEAT: u8 = 1;
@@ -38,6 +41,12 @@ pub struct AudioPacket {
 
     /// Right channel RMS level (linear, 0-1)
     pub right_rms: f32,
+
+    /// Left channel oscilloscope waveform samples, linear amplitude -1..1, length = WAVE_SIZE
+    pub left_wave: Vec<f32>,
+
+    /// Right channel oscilloscope waveform samples, linear amplitude -1..1, length = WAVE_SIZE
+    pub right_wave: Vec<f32>,
 }
 
 impl AudioPacket {
@@ -51,6 +60,8 @@ impl AudioPacket {
         right_peak: f32,
         left_rms: f32,
         right_rms: f32,
+        left_wave: Vec<f32>,
+        right_wave: Vec<f32>,
     ) -> Self {
         Self {
             packet_type: PACKET_TYPE_FFT,
@@ -62,6 +73,8 @@ impl AudioPacket {
             right_peak,
             left_rms,
             right_rms,
+            left_wave,
+            right_wave,
         }
     }
 
@@ -77,6 +90,8 @@ impl AudioPacket {
             right_peak: -100.0,
             left_rms: 0.0,
             right_rms: 0.0,
+            left_wave: vec![0.0; WAVE_SIZE],
+            right_wave: vec![0.0; WAVE_SIZE],
         }
     }
 
@@ -106,6 +121,8 @@ mod tests {
             -3.0,
             0.5,
             0.5,
+            vec![0.0; WAVE_SIZE],
+            vec![0.0; WAVE_SIZE],
         );
 
         let bytes = packet.to_bytes();
@@ -128,11 +145,13 @@ mod tests {
             -3.0,
             0.5,
             0.5,
+            vec![0.0; WAVE_SIZE],
+            vec![0.0; WAVE_SIZE],
         );
 
         let bytes = packet.to_bytes();
-        // 2048 bins × 2 channels × 4 bytes + overhead ≈ 16.4 KB
-        assert!(bytes.len() < 20_000, "Packet too large: {} bytes", bytes.len());
+        // 2048 bins × 2 channels × 4 bytes + 512 wave × 2 channels × 4 bytes + overhead ≈ 20.5 KB
+        assert!(bytes.len() < 24_000, "Packet too large: {} bytes", bytes.len());
         println!("Packet size: {} bytes", bytes.len());
     }
 }
