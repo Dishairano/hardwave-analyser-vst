@@ -2,14 +2,13 @@
 
 use crossbeam_channel::{bounded, Receiver, Sender, TryRecvError};
 use parking_lot::Mutex;
-use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use tungstenite::protocol::WebSocket;
-use tungstenite::{Message, client::IntoClientRequest, handshake::client::generate_key};
+use tungstenite::{Message, client::IntoClientRequest};
 
 use crate::protocol::AudioPacket;
 
@@ -153,48 +152,11 @@ impl WebSocketClient {
         stream.set_read_timeout(Some(Duration::from_millis(100))).ok();
         stream.set_write_timeout(Some(Duration::from_millis(100))).ok();
 
-        // Perform WebSocket handshake manually
-        let key = generate_key();
-        let request = format!(
-            "GET / HTTP/1.1\r\n\
-             Host: 127.0.0.1:{}\r\n\
-             Upgrade: websocket\r\n\
-             Connection: Upgrade\r\n\
-             Sec-WebSocket-Key: {}\r\n\
-             Sec-WebSocket-Version: 13\r\n\
-             \r\n",
-            port, key
-        );
-
-        let mut stream_clone = stream.try_clone().map_err(|_| ())?;
-        stream_clone.write_all(request.as_bytes()).map_err(|_| ())?;
-
-        // Read response
-        let mut response = [0u8; 1024];
-        let mut total_read = 0;
-        loop {
-            let n = stream_clone.read(&mut response[total_read..]).map_err(|_| ())?;
-            if n == 0 {
-                return Err(());
-            }
-            total_read += n;
-            // Check for end of headers
-            if total_read >= 4 && &response[total_read - 4..total_read] == b"\r\n\r\n" {
-                break;
-            }
-            if total_read >= response.len() {
-                return Err(());
-            }
-        }
-
-        // Verify response contains 101 Switching Protocols
-        let response_str = std::str::from_utf8(&response[..total_read]).map_err(|_| ())?;
-        if !response_str.contains("101") || !response_str.to_lowercase().contains("upgrade") {
-            return Err(());
-        }
-
-        // Create WebSocket from the stream
-        let socket = WebSocket::from_raw_socket(stream_clone, tungstenite::protocol::Role::Client, None);
+        // Use tungstenite's built-in handshake which validates Sec-WebSocket-Accept
+        // per RFC 6455, preventing connections to rogue local services.
+        let url = format!("ws://127.0.0.1:{}/", port);
+        let request = url.into_client_request().map_err(|_| ())?;
+        let (socket, _response) = tungstenite::client(request, stream).map_err(|_| ())?;
         Ok(socket)
     }
 

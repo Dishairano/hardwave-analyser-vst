@@ -97,7 +97,7 @@ impl AudioPacket {
 
     /// Serialize the packet to binary format
     pub fn to_bytes(&self) -> Vec<u8> {
-        bincode::serialize(self).expect("Failed to serialize packet")
+        bincode::serialize(self).unwrap_or_default()
     }
 
     /// Deserialize a packet from binary format

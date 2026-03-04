@@ -15,6 +15,7 @@ mod websocket;
 
 use crossbeam_channel::{bounded, Sender};
 use nih_plug::prelude::*;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -44,10 +45,10 @@ pub struct HardwaveAnalyser {
     fft_right: FftProcessor,
 
     /// Sample buffer for left channel
-    buffer_left: Vec<f32>,
+    buffer_left: VecDeque<f32>,
 
     /// Sample buffer for right channel
-    buffer_right: Vec<f32>,
+    buffer_right: VecDeque<f32>,
 
     /// Current sample rate
     sample_rate: f32,
@@ -79,8 +80,8 @@ impl Default for HardwaveAnalyser {
             },
             fft_left: FftProcessor::new(),
             fft_right: FftProcessor::new(),
-            buffer_left: Vec::with_capacity(FFT_SIZE),
-            buffer_right: Vec::with_capacity(FFT_SIZE),
+            buffer_left: VecDeque::with_capacity(FFT_SIZE),
+            buffer_right: VecDeque::with_capacity(FFT_SIZE),
             sample_rate: 48000.0,
             samples_since_send: 0,
             samples_per_send: 2400, // 48000 / 20 = 2400 samples for 20Hz
@@ -197,14 +198,14 @@ impl Plugin for HardwaveAnalyser {
                 left
             };
 
-            // Add to buffers
-            self.buffer_left.push(left);
-            self.buffer_right.push(right);
+            // Add to ring buffers
+            self.buffer_left.push_back(left);
+            self.buffer_right.push_back(right);
 
             // Keep buffer at FFT_SIZE
             if self.buffer_left.len() > FFT_SIZE {
-                self.buffer_left.remove(0);
-                self.buffer_right.remove(0);
+                self.buffer_left.pop_front();
+                self.buffer_right.pop_front();
             }
 
             self.samples_since_send += 1;
@@ -235,13 +236,14 @@ impl HardwaveAnalyser {
 
     /// Process and send FFT data
     fn send_fft_data(&mut self) {
-        // Process FFT for both channels → raw magnitude bins in dB
-        let left_bins = self.fft_left.process(&self.buffer_left, self.sample_rate);
-        let right_bins = self.fft_right.process(&self.buffer_right, self.sample_rate);
+        // Make VecDeque storage contiguous so we can take a slice.
+        let left_slice = self.buffer_left.make_contiguous();
+        let left_bins = self.fft_left.process(left_slice, self.sample_rate);
+        let (left_peak, left_rms) = FftProcessor::calculate_levels(left_slice);
 
-        // Calculate levels
-        let (left_peak, left_rms) = FftProcessor::calculate_levels(&self.buffer_left);
-        let (right_peak, right_rms) = FftProcessor::calculate_levels(&self.buffer_right);
+        let right_slice = self.buffer_right.make_contiguous();
+        let right_bins = self.fft_right.process(right_slice, self.sample_rate);
+        let (right_peak, right_rms) = FftProcessor::calculate_levels(right_slice);
 
         // Create and send packet
         let timestamp_ms = self.start_time.elapsed().as_millis() as u64;
@@ -254,15 +256,18 @@ impl HardwaveAnalyser {
             ));
         }
 
-        // Extract oscilloscope waveform: last WAVE_SIZE samples from ring buffer
+        // Extract oscilloscope waveform: last WAVE_SIZE samples.
+        // buffer_left/right are already contiguous after make_contiguous() above.
         use protocol::WAVE_SIZE;
-        let left_wave = if self.buffer_left.len() >= WAVE_SIZE {
-            self.buffer_left[self.buffer_left.len() - WAVE_SIZE..].to_vec()
+        let left_slice = self.buffer_left.as_slices().0;
+        let left_wave = if left_slice.len() >= WAVE_SIZE {
+            left_slice[left_slice.len() - WAVE_SIZE..].to_vec()
         } else {
             vec![0.0_f32; WAVE_SIZE]
         };
-        let right_wave = if self.buffer_right.len() >= WAVE_SIZE {
-            self.buffer_right[self.buffer_right.len() - WAVE_SIZE..].to_vec()
+        let right_slice = self.buffer_right.as_slices().0;
+        let right_wave = if right_slice.len() >= WAVE_SIZE {
+            right_slice[right_slice.len() - WAVE_SIZE..].to_vec()
         } else {
             vec![0.0_f32; WAVE_SIZE]
         };
