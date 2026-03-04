@@ -74,13 +74,11 @@ fn ensure_webview2() {
     let bootstrapper_path = temp_dir.join("MicrosoftEdgeWebview2Setup.exe");
 
     let download = Command::new("powershell")
+        .env("HW_OUTFILE", &bootstrapper_path)
         .args([
             "-NoProfile",
             "-Command",
-            &format!(
-                "Invoke-WebRequest -Uri 'https://go.microsoft.com/fwlink/p/?LinkId=2124703' -OutFile '{}'",
-                bootstrapper_path.display()
-            ),
+            "Invoke-WebRequest -Uri 'https://go.microsoft.com/fwlink/p/?LinkId=2124703' -OutFile $env:HW_OUTFILE",
         ])
         .output();
 
@@ -117,20 +115,21 @@ impl rwh06::HasWindowHandle for RwhWrapper {
             ParentWindowHandle::X11Window(window) => {
                 let handle = rwh06::XcbWindowHandle::new(
                     std::num::NonZeroU32::new(window)
-                        .expect("X11 window handle must be non-zero"),
+                        .ok_or(rwh06::HandleError::Unavailable)?,
                 );
                 rwh06::RawWindowHandle::Xcb(handle)
             }
             ParentWindowHandle::AppKitNsView(ns_view) => {
                 let handle = rwh06::AppKitWindowHandle::new(
-                    std::ptr::NonNull::new(ns_view).expect("NSView must be non-null"),
+                    std::ptr::NonNull::new(ns_view)
+                        .ok_or(rwh06::HandleError::Unavailable)?,
                 );
                 rwh06::RawWindowHandle::AppKit(handle)
             }
             ParentWindowHandle::Win32Hwnd(hwnd) => {
                 let handle = rwh06::Win32WindowHandle::new(
                     std::num::NonZeroIsize::new(hwnd as isize)
-                        .expect("HWND must be non-zero"),
+                        .ok_or(rwh06::HandleError::Unavailable)?,
                 );
                 rwh06::RawWindowHandle::Win32(handle)
             }
@@ -205,10 +204,18 @@ impl HardwaveAnalyserEditor {
     }
 
     fn build_url(&self) -> String {
+        ANALYSER_URL.to_string()
+    }
+
+    fn token_init_script(&self) -> String {
         let token = self.auth_token.lock();
         match token.as_deref() {
-            Some(t) => format!("{}?token={}", ANALYSER_URL, t),
-            None => ANALYSER_URL.to_string(),
+            Some(t) => {
+                // Escape backslashes and backticks so the token is safe to embed in JS.
+                let escaped = t.replace('\\', "\\\\").replace('`', "\\`");
+                format!("window.__hardwave_token = `{}`;", escaped)
+            }
+            None => "window.__hardwave_token = null;".to_string(),
         }
     }
 }
@@ -314,6 +321,7 @@ impl Editor for HardwaveAnalyserEditor {
         let running = Arc::new(AtomicBool::new(true));
         let auth_token = Arc::clone(&self.auth_token);
         let url = self.build_url();
+        let token_script = self.token_init_script();
 
         // ---------------------------------------------------------------
         // Windows: create webview on the DAW's UI thread using build()
@@ -362,6 +370,7 @@ impl Editor for HardwaveAnalyserEditor {
             let init_script = format!(
                 r#"
                 window.__HARDWAVE_VST = true;
+                {token_script}
                 window.__hardwave = {{
                     saveToken: function(token) {{
                         window.ipc.postMessage('saveToken:' + token);
@@ -436,7 +445,8 @@ impl Editor for HardwaveAnalyserEditor {
                     }}
                 }})();
                 "#,
-                port = server_port
+                port = server_port,
+                token_script = token_script,
             );
 
             #[allow(unused_imports)]
@@ -536,16 +546,18 @@ impl Editor for HardwaveAnalyserEditor {
                             *ipc_auth_token.lock() = Some(token);
                         }
                     })
-                    .with_initialization_script(
+                    .with_initialization_script(&format!(
                         r#"
                         window.__HARDWAVE_VST = true;
-                        window.__hardwave = {
-                            saveToken: function(token) {
+                        {token_script}
+                        window.__hardwave = {{
+                            saveToken: function(token) {{
                                 window.ipc.postMessage('saveToken:' + token);
-                            }
-                        };
+                            }}
+                        }};
                         "#,
-                    )
+                        token_script = token_script,
+                    ))
                     .build_as_child(&parent_wrapper);
 
                 match webview {
