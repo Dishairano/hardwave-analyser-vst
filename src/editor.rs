@@ -101,8 +101,17 @@ const PLUGIN_OS: &str = "unknown";
 // WebView2 auto-install (Windows only)
 // ---------------------------------------------------------------------------
 
+/// Cached result of the WebView2 presence check. Spawning reg.exe is slow
+/// (~2-3 s each with AV scanning). We only need to check once per DAW session.
+#[cfg(target_os = "windows")]
+static WEBVIEW2_ENSURED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 #[cfg(target_os = "windows")]
 fn ensure_webview2() {
+    // Already confirmed present this session — skip the slow reg.exe checks.
+    if WEBVIEW2_ENSURED.load(Ordering::Relaxed) { return; }
+
     use std::process::Command;
 
     let installed = Command::new("reg")
@@ -115,7 +124,10 @@ fn ensure_webview2() {
         .map(|o| o.status.success())
         .unwrap_or(false);
 
-    if installed { return; }
+    if installed {
+        WEBVIEW2_ENSURED.store(true, Ordering::Relaxed);
+        return;
+    }
 
     let installed_user = Command::new("reg")
         .args([
@@ -127,7 +139,10 @@ fn ensure_webview2() {
         .map(|o| o.status.success())
         .unwrap_or(false);
 
-    if installed_user { return; }
+    if installed_user {
+        WEBVIEW2_ENSURED.store(true, Ordering::Relaxed);
+        return;
+    }
 
     nih_log!("WebView2 Runtime not found — downloading bootstrapper...");
 
@@ -150,6 +165,7 @@ fn ensure_webview2() {
                 .args(["/silent", "/install"])
                 .output();
             let _ = std::fs::remove_file(&bootstrapper_path);
+            WEBVIEW2_ENSURED.store(true, Ordering::Relaxed);
         }
         _ => {
             nih_log!("Failed to download WebView2 bootstrapper");
