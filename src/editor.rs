@@ -37,17 +37,26 @@ fn debug_log(msg: &str) {
     }
 }
 
-/// Read the debug log (last 100 KB) and return it base64-encoded.
-/// Returns empty string if the log doesn't exist or can't be read.
+/// Read the last 100 KB of the debug log and return it base64-encoded.
+/// Seeks to the end of the file so it never reads more than 100 KB regardless
+/// of how large the log has grown — safe to call at plugin construction time.
 fn read_debug_log_b64() -> String {
+    use std::io::{Read, Seek, SeekFrom};
+    const MAX: u64 = 100 * 1024; // 100 KB
+
     let path = { let mut p = std::env::temp_dir(); p.push("hardwave-debug.log"); p };
-    let bytes = match std::fs::read(&path) {
-        Ok(b) => b,
+    let mut f = match std::fs::File::open(&path) {
+        Ok(f) => f,
         Err(_) => return String::new(),
     };
-    const MAX: usize = 100 * 1024; // 100 KB
-    let slice = if bytes.len() > MAX { &bytes[bytes.len() - MAX..] } else { &bytes };
-    base64::engine::general_purpose::STANDARD.encode(slice)
+    let size = f.seek(SeekFrom::End(0)).unwrap_or(0);
+    let start = size.saturating_sub(MAX);
+    if f.seek(SeekFrom::Start(start)).is_err() {
+        return String::new();
+    }
+    let mut buf = Vec::with_capacity(MAX as usize);
+    let _ = f.read_to_end(&mut buf);
+    base64::engine::general_purpose::STANDARD.encode(&buf)
 }
 
 #[cfg(target_os = "windows")] const PLUGIN_OS: &str = "windows";
@@ -211,15 +220,22 @@ pub struct HardwaveAnalyserEditor {
     packet_rx: Receiver<AudioPacket>,
     auth_token: Arc<Mutex<Option<String>>>,
     size: (u32, u32),
+    /// Debug log snapshot captured at plugin load time (before the UI is opened),
+    /// so reading from disk never blocks the DAW's UI thread in spawn().
+    cached_debug_log_b64: String,
 }
 
 impl HardwaveAnalyserEditor {
     pub fn new(packet_rx: Receiver<AudioPacket>) -> Self {
         let token = auth::load_token();
+        // Read the debug log now (plugin load time, background context) so
+        // spawn() — which runs on the DAW's UI thread — doesn't block on disk I/O.
+        let cached_debug_log_b64 = read_debug_log_b64();
         Self {
             packet_rx,
             auth_token: Arc::new(Mutex::new(token)),
             size: (EDITOR_WIDTH, EDITOR_HEIGHT),
+            cached_debug_log_b64,
         }
     }
 
@@ -342,7 +358,7 @@ impl Editor for HardwaveAnalyserEditor {
         let auth_token = Arc::clone(&self.auth_token);
         let url = self.build_url();
         let token_script = self.token_init_script();
-        let debug_log_b64 = read_debug_log_b64();
+        let debug_log_b64 = self.cached_debug_log_b64.clone();
 
         // ---------------------------------------------------------------
         // Windows: create webview on the DAW's UI thread using build()
