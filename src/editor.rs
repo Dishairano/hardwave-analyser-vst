@@ -6,6 +6,7 @@
 //! threading restriction on ICoreWebView2::ExecuteScript and the wry
 //! custom-protocol interception issues in wry 0.46.
 
+use base64::Engine as _;
 use crossbeam_channel::Receiver;
 use nih_plug::prelude::*;
 use parking_lot::Mutex;
@@ -35,6 +36,25 @@ fn debug_log(msg: &str) {
         let _ = writeln!(f, "[{}] {}", now, msg);
     }
 }
+
+/// Read the debug log (last 100 KB) and return it base64-encoded.
+/// Returns empty string if the log doesn't exist or can't be read.
+fn read_debug_log_b64() -> String {
+    let path = { let mut p = std::env::temp_dir(); p.push("hardwave-debug.log"); p };
+    let bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(_) => return String::new(),
+    };
+    const MAX: usize = 100 * 1024; // 100 KB
+    let slice = if bytes.len() > MAX { &bytes[bytes.len() - MAX..] } else { &bytes };
+    base64::engine::general_purpose::STANDARD.encode(slice)
+}
+
+#[cfg(target_os = "windows")] const PLUGIN_OS: &str = "windows";
+#[cfg(target_os = "macos")]   const PLUGIN_OS: &str = "macos";
+#[cfg(target_os = "linux")]   const PLUGIN_OS: &str = "linux";
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+const PLUGIN_OS: &str = "unknown";
 
 // ---------------------------------------------------------------------------
 // WebView2 auto-install (Windows only)
@@ -101,7 +121,7 @@ const EDITOR_WIDTH: u32 = 1100;
 const EDITOR_HEIGHT: u32 = 700;
 
 /// Base URL for the analyser page.
-const ANALYSER_URL: &str = "https://hardwavestudios.com/vst/analyser";
+const ANALYSER_URL: &str = "https://hardwarestudios.com/vst/analyser";
 
 // ---------------------------------------------------------------------------
 // raw-window-handle 0.5 (nih-plug) → 0.6 (wry) bridge
@@ -322,6 +342,7 @@ impl Editor for HardwaveAnalyserEditor {
         let auth_token = Arc::clone(&self.auth_token);
         let url = self.build_url();
         let token_script = self.token_init_script();
+        let debug_log_b64 = read_debug_log_b64();
 
         // ---------------------------------------------------------------
         // Windows: create webview on the DAW's UI thread using build()
@@ -372,10 +393,13 @@ impl Editor for HardwaveAnalyserEditor {
                 window.__HARDWAVE_VST = true;
                 {token_script}
                 window.__hardwave = {{
+                    version: "{version}",
+                    os: "{os}",
                     saveToken: function(token) {{
                         window.ipc.postMessage('saveToken:' + token);
                     }}
                 }};
+                window.__HARDWAVE_DEBUG_LOG = "{debug_log}";
 
                 // Poll for FFT data from the local TCP packet server.
                 // On Windows, evaluate_script from a Rust background thread
@@ -445,8 +469,11 @@ impl Editor for HardwaveAnalyserEditor {
                     }}
                 }})();
                 "#,
-                port = server_port,
                 token_script = token_script,
+                version = env!("CARGO_PKG_VERSION"),
+                os = PLUGIN_OS,
+                debug_log = debug_log_b64,
+                port = server_port,
             );
 
             #[allow(unused_imports)]
@@ -551,12 +578,18 @@ impl Editor for HardwaveAnalyserEditor {
                         window.__HARDWAVE_VST = true;
                         {token_script}
                         window.__hardwave = {{
+                            version: "{version}",
+                            os: "{os}",
                             saveToken: function(token) {{
                                 window.ipc.postMessage('saveToken:' + token);
                             }}
                         }};
+                        window.__HARDWAVE_DEBUG_LOG = "{debug_log}";
                         "#,
                         token_script = token_script,
+                        version = env!("CARGO_PKG_VERSION"),
+                        os = PLUGIN_OS,
+                        debug_log = debug_log_b64,
                     ))
                     .build_as_child(&parent_wrapper);
 
