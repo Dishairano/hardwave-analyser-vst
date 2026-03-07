@@ -37,6 +37,38 @@ fn debug_log(msg: &str) {
     }
 }
 
+/// Stopwatch that records named checkpoints with millisecond timestamps.
+/// Call `mark("label")` at each step, then `dump()` to write the full
+/// timeline to the debug log so we can see where time is spent.
+struct Stopwatch {
+    start: std::time::Instant,
+    marks: Vec<(String, u128)>,
+}
+
+impl Stopwatch {
+    fn new(label: &str) -> Self {
+        let start = std::time::Instant::now();
+        Self { start, marks: vec![(label.to_string(), 0)] }
+    }
+
+    fn mark(&mut self, label: &str) {
+        let elapsed = self.start.elapsed().as_millis();
+        self.marks.push((label.to_string(), elapsed));
+    }
+
+    fn dump(&mut self, label: &str) {
+        self.mark(label);
+        let mut lines = vec![format!("=== SPAWN TIMING ===")];
+        let mut prev = 0u128;
+        for (name, ms) in &self.marks {
+            lines.push(format!("  {:>6} ms  (+{} ms)  {}", ms, ms - prev, name));
+            prev = *ms;
+        }
+        lines.push(format!("===================="));
+        debug_log(&lines.join("\n"));
+    }
+}
+
 /// Read the last 100 KB of the debug log and return it base64-encoded.
 /// Seeks to the end of the file so it never reads more than 100 KB regardless
 /// of how large the log has grown — safe to call at plugin construction time.
@@ -375,6 +407,8 @@ impl Editor for HardwaveAnalyserEditor {
         // ---------------------------------------------------------------
         #[cfg(target_os = "windows")]
         {
+            let mut sw = Stopwatch::new("spawn() start");
+
             let parent_hwnd = match parent {
                 ParentWindowHandle::Win32Hwnd(h) => h as usize,
                 _ => 0,
@@ -382,6 +416,7 @@ impl Editor for HardwaveAnalyserEditor {
             debug_log(&format!("spawn() called, parent HWND = 0x{:X}", parent_hwnd));
 
             ensure_webview2();
+            sw.mark("ensure_webview2()");
 
             // Use a writable data directory for WebView2. The default is the
             // executable's folder (FL Studio's Program Files) which is not
@@ -390,19 +425,19 @@ impl Editor for HardwaveAnalyserEditor {
                 .unwrap_or_else(std::env::temp_dir)
                 .join("Hardwave")
                 .join("WebView2");
-            debug_log(&format!("WebView2 data dir = {:?}", data_dir));
             let _ = std::fs::create_dir_all(&data_dir);
+            sw.mark("data dir ready");
+
             let mut web_context = wry::WebContext::new(Some(data_dir));
+            sw.mark("WebContext::new()");
 
             let parent_wrapper = RwhWrapper(parent);
             let ipc_auth_token = Arc::clone(&auth_token);
 
-            debug_log(&format!("URL = {}", url));
-
             // Start the local HTTP server that serves FFT packets as JSON.
             // JS polls http://127.0.0.1:{port}/ at ~60fps.
             let server_port = start_packet_server(packet_rx.clone(), Arc::clone(&running));
-            debug_log(&format!("Packet server listening on port {}", server_port));
+            sw.mark(&format!("packet server bound (port {})", server_port));
 
             let init_script = format!(
                 r#"
@@ -430,14 +465,25 @@ impl Editor for HardwaveAnalyserEditor {
                     var _fetchErr = 0;
                     var _packetsSent = 0;
 
+                    var _t0 = performance.now();
                     function dbg(msg) {{
-                        try {{ window.ipc.postMessage('debug:' + msg); }} catch(e) {{}}
+                        var ms = Math.round(performance.now() - _t0);
+                        try {{ window.ipc.postMessage('debug:[+' + ms + 'ms] ' + msg); }} catch(e) {{}}
                     }}
+
+                    dbg('init script running');
+
+                    document.addEventListener('DOMContentLoaded', function() {{
+                        dbg('DOMContentLoaded');
+                    }});
+                    window.addEventListener('load', function() {{
+                        dbg('window load complete');
+                    }});
 
                     function startPolling() {{
                         if (_polling) return;
                         _polling = true;
-                        dbg('polling started on ' + window.location.href + ' port={port}');
+                        dbg('polling started — port={port}');
 
                         (function poll() {{
                             fetch('http://127.0.0.1:{port}/')
@@ -492,6 +538,8 @@ impl Editor for HardwaveAnalyserEditor {
                 port = server_port,
             );
 
+            sw.mark("init script built");
+
             #[allow(unused_imports)]
             use wry::WebViewBuilderExtWindows as _;
 
@@ -521,7 +569,7 @@ impl Editor for HardwaveAnalyserEditor {
 
             match webview {
                 Ok(wv) => {
-                    debug_log("WebView created successfully (TCP packet server active)!");
+                    sw.dump("WebViewBuilder::build() OK — webview visible");
                     Box::new(EditorHandle {
                         _thread: None,
                         _webview: Some(Arc::new(Mutex::new(SendWebView(wv)))),
@@ -530,7 +578,7 @@ impl Editor for HardwaveAnalyserEditor {
                     })
                 }
                 Err(e) => {
-                    debug_log(&format!("FAILED to create webview: {}", e));
+                    sw.dump(&format!("WebViewBuilder::build() FAILED: {}", e));
                     Box::new(EditorHandle {
                         _thread: None,
                         _webview: None,
