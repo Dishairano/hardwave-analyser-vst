@@ -178,7 +178,7 @@ const EDITOR_WIDTH: u32 = 1100;
 const EDITOR_HEIGHT: u32 = 700;
 
 /// Base URL for the analyser page.
-const ANALYSER_URL: &str = "https://hardwarestudios.com/vst/analyser";
+const ANALYSER_URL: &str = "https://hardwavestudios.com/vst/analyser";
 
 // ---------------------------------------------------------------------------
 // raw-window-handle 0.5 (nih-plug) → 0.6 (wry) bridge
