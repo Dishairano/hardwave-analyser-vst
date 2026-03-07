@@ -409,6 +409,11 @@ impl Editor for HardwaveAnalyserEditor {
         {
             let mut sw = Stopwatch::new("spawn() start");
 
+            // Drain any backlogged packets from the previous session so the
+            // channel doesn't stay full and spam the log.
+            while self.packet_rx.try_recv().is_ok() {}
+            sw.mark("channel drained");
+
             let parent_hwnd = match parent {
                 ParentWindowHandle::Win32Hwnd(h) => h as usize,
                 _ => 0,
@@ -418,13 +423,37 @@ impl Editor for HardwaveAnalyserEditor {
             ensure_webview2();
             sw.mark("ensure_webview2()");
 
-            // Use a writable data directory for WebView2. The default is the
-            // executable's folder (FL Studio's Program Files) which is not
-            // writable → E_ACCESSDENIED.
-            let data_dir = dirs::data_local_dir()
+            // Give each spawn its own unique data directory so we never block
+            // waiting for the previous WebView2 browser process to release its
+            // directory lock (the lock is held for several seconds after the
+            // window closes, causing a 5-6 s stall on double-spawn by the DAW).
+            // Old session directories are cleaned up here before creating the new one.
+            let base_dir = dirs::data_local_dir()
                 .unwrap_or_else(std::env::temp_dir)
                 .join("Hardwave")
                 .join("WebView2");
+            let session_ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+
+            // Remove stale session dirs (older than 120 s). Failures are fine —
+            // a still-locked dir simply won't delete until next time.
+            if let Ok(entries) = std::fs::read_dir(&base_dir) {
+                for entry in entries.flatten() {
+                    if let Ok(meta) = entry.metadata() {
+                        if let Ok(modified) = meta.modified() {
+                            if let Ok(age) = std::time::SystemTime::now().duration_since(modified) {
+                                if age.as_secs() > 120 {
+                                    let _ = std::fs::remove_dir_all(entry.path());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            let data_dir = base_dir.join(format!("s{}", session_ts));
             let _ = std::fs::create_dir_all(&data_dir);
             sw.mark("data dir ready");
 
