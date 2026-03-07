@@ -108,7 +108,7 @@ static WEBVIEW2_ENSURED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
 #[cfg(target_os = "windows")]
-fn ensure_webview2() {
+pub(crate) fn ensure_webview2() {
     // Already confirmed present this session — skip the slow reg.exe checks.
     if WEBVIEW2_ENSURED.load(Ordering::Relaxed) { return; }
 
@@ -279,6 +279,41 @@ impl HardwaveAnalyserEditor {
         // Read the debug log now (plugin load time, background context) so
         // spawn() — which runs on the DAW's UI thread — doesn't block on disk I/O.
         let cached_debug_log_b64 = read_debug_log_b64();
+
+        // Pre-warm WebView2 check and clean up stale session dirs in the background
+        // so neither blocks the DAW's UI thread when the user opens the plugin window.
+        #[cfg(target_os = "windows")]
+        {
+            std::thread::spawn(|| {
+                // 1) Run the WebView2 reg check once so WEBVIEW2_ENSURED is already
+                //    set by the time spawn() is called — avoids ~5 s reg.exe delay.
+                ensure_webview2();
+
+                // 2) Clean up stale WebView2 session directories (older than 120 s).
+                //    Doing this in new() (plugin load) rather than spawn() (UI open)
+                //    means it doesn't eat into the perceived open latency.
+                let base_dir = dirs::data_local_dir()
+                    .unwrap_or_else(std::env::temp_dir)
+                    .join("Hardwave")
+                    .join("WebView2");
+                if let Ok(entries) = std::fs::read_dir(&base_dir) {
+                    for entry in entries.flatten() {
+                        if let Ok(meta) = entry.metadata() {
+                            if let Ok(modified) = meta.modified() {
+                                if let Ok(age) =
+                                    std::time::SystemTime::now().duration_since(modified)
+                                {
+                                    if age.as_secs() > 120 {
+                                        let _ = std::fs::remove_dir_all(entry.path());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
         Self {
             packet_rx,
             auth_token: Arc::new(Mutex::new(token)),
@@ -453,22 +488,6 @@ impl Editor for HardwaveAnalyserEditor {
                 .unwrap_or_default()
                 .as_secs();
 
-            // Remove stale session dirs (older than 120 s). Failures are fine —
-            // a still-locked dir simply won't delete until next time.
-            if let Ok(entries) = std::fs::read_dir(&base_dir) {
-                for entry in entries.flatten() {
-                    if let Ok(meta) = entry.metadata() {
-                        if let Ok(modified) = meta.modified() {
-                            if let Ok(age) = std::time::SystemTime::now().duration_since(modified) {
-                                if age.as_secs() > 120 {
-                                    let _ = std::fs::remove_dir_all(entry.path());
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
             let data_dir = base_dir.join(format!("s{}", session_ts));
             let _ = std::fs::create_dir_all(&data_dir);
             sw.mark("data dir ready");
@@ -486,6 +505,13 @@ impl Editor for HardwaveAnalyserEditor {
 
             let init_script = format!(
                 r#"
+                // Apply dark background immediately to prevent white flash while page loads.
+                document.documentElement.style.cssText += ';background:#0a0a0b!important;';
+                document.addEventListener('DOMContentLoaded', function() {{
+                    document.documentElement.style.cssText += ';background:#0a0a0b!important;';
+                    if (document.body) document.body.style.cssText += ';background:#0a0a0b!important;';
+                }});
+
                 window.__HARDWAVE_VST = true;
                 {token_script}
                 window.__hardwave = {{
@@ -684,6 +710,12 @@ impl Editor for HardwaveAnalyserEditor {
                     })
                     .with_initialization_script(&format!(
                         r#"
+                        document.documentElement.style.cssText += ';background:#0a0a0b!important;';
+                        document.addEventListener('DOMContentLoaded', function() {{
+                            document.documentElement.style.cssText += ';background:#0a0a0b!important;';
+                            if (document.body) document.body.style.cssText += ';background:#0a0a0b!important;';
+                        }});
+
                         window.__HARDWAVE_VST = true;
                         {token_script}
                         window.__hardwave = {{
