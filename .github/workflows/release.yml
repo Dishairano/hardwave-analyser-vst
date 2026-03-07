@@ -144,3 +144,10 @@ jobs:
             1. Add **Hardwave Analyser** to any channel in your DAW
             2. The plugin opens an embedded spectrum analyser (requires Hardwave Pro subscription)
             3. Log in once — credentials are saved locally
+
+      - name: Sync version to website DB
+        run: |
+          curl -sf -X POST https://hardwavestudios.com/api/internal/sync-version \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer ${{ secrets.INTERNAL_API_SECRET }}" \
+            -d "{\"slug\":\"analyser\",\"version\":\"${{ steps.version.outputs.version }}\"}"
