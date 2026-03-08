@@ -88,7 +88,10 @@ jobs:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
 
       - name: Build (Apple Silicon)
-        run: cargo xtask bundle hardwave-analyser --release
+        run: |
+          cargo xtask bundle hardwave-analyser --release
+          cp target/bundled/hardwave-analyser.vst3/Contents/MacOS/hardwave-analyser /tmp/hw-arm64-vst3
+          cp target/bundled/hardwave-analyser.clap/Contents/MacOS/hardwave-analyser /tmp/hw-arm64-clap
 
       - name: Build (Intel, cross-compile)
         run: cargo xtask bundle hardwave-analyser --release --target x86_64-apple-darwin
@@ -96,12 +99,12 @@ jobs:
       - name: Create universal binaries with lipo
         run: |
           lipo -create \
+            /tmp/hw-arm64-vst3 \
             target/bundled/hardwave-analyser.vst3/Contents/MacOS/hardwave-analyser \
-            target/x86_64-apple-darwin/bundled/hardwave-analyser.vst3/Contents/MacOS/hardwave-analyser \
             -output target/bundled/hardwave-analyser.vst3/Contents/MacOS/hardwave-analyser
           lipo -create \
+            /tmp/hw-arm64-clap \
             target/bundled/hardwave-analyser.clap/Contents/MacOS/hardwave-analyser \
-            target/x86_64-apple-darwin/bundled/hardwave-analyser.clap/Contents/MacOS/hardwave-analyser \
             -output target/bundled/hardwave-analyser.clap/Contents/MacOS/hardwave-analyser
 
       - name: Package
