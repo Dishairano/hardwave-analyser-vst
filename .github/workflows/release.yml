@@ -76,58 +76,47 @@ jobs:
           name: hardwave-analyser-windows-x64
           path: target/bundled/hardwave-analyser-windows-x64.zip
 
-  build-macos-arm64:
+  build-macos:
     runs-on: macos-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Rust
+      - name: Install Rust (both macOS targets)
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-darwin
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
 
-      - name: Build
+      - name: Build (Apple Silicon)
         run: cargo xtask bundle hardwave-analyser --release
+
+      - name: Build (Intel, cross-compile)
+        run: cargo xtask bundle hardwave-analyser --release --target x86_64-apple-darwin
+
+      - name: Create universal binaries with lipo
+        run: |
+          lipo -create \
+            target/bundled/hardwave-analyser.vst3/Contents/MacOS/hardwave-analyser \
+            target/x86_64-apple-darwin/bundled/hardwave-analyser.vst3/Contents/MacOS/hardwave-analyser \
+            -output target/bundled/hardwave-analyser.vst3/Contents/MacOS/hardwave-analyser
+          lipo -create \
+            target/bundled/hardwave-analyser.clap/Contents/MacOS/hardwave-analyser \
+            target/x86_64-apple-darwin/bundled/hardwave-analyser.clap/Contents/MacOS/hardwave-analyser \
+            -output target/bundled/hardwave-analyser.clap/Contents/MacOS/hardwave-analyser
 
       - name: Package
         run: |
           cd target/bundled
-          zip -r hardwave-analyser-macos-arm64.zip hardwave-analyser.vst3 hardwave-analyser.clap
+          zip -r hardwave-analyser-macos-universal.zip hardwave-analyser.vst3 hardwave-analyser.clap
 
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: hardwave-analyser-macos-arm64
-          path: target/bundled/hardwave-analyser-macos-arm64.zip
-
-  build-macos-x64:
-    runs-on: macos-13
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-apple-darwin
-
-      - name: Build
-        run: cargo xtask bundle hardwave-analyser --release
-
-      - name: Package
-        run: |
-          cd target/bundled
-          zip -r hardwave-analyser-macos-x64.zip hardwave-analyser.vst3 hardwave-analyser.clap
-
-      - name: Upload
-        uses: actions/upload-artifact@v4
-        with:
-          name: hardwave-analyser-macos-x64
-          path: target/bundled/hardwave-analyser-macos-x64.zip
+          name: hardwave-analyser-macos-universal
+          path: target/bundled/hardwave-analyser-macos-universal.zip
 
   release:
-    needs: [build-linux, build-windows, build-macos-arm64, build-macos-x64]
+    needs: [build-linux, build-windows, build-macos]
     runs-on: [self-hosted, linux, x64]
     permissions:
       contents: write
@@ -164,8 +153,7 @@ jobs:
           files: |
             artifacts/hardwave-analyser-linux-x64/*.tar.gz
             artifacts/hardwave-analyser-windows-x64/*.zip
-            artifacts/hardwave-analyser-macos-arm64/*.zip
-            artifacts/hardwave-analyser-macos-x64/*.zip
+            artifacts/hardwave-analyser-macos-universal/*.zip
           body: |
             ## Hardwave Analyser ${{ steps.version.outputs.version }}
 
@@ -177,8 +165,7 @@ jobs:
             |----------|------|
             | Linux x64 | `hardwave-analyser-linux-x64.tar.gz` |
             | Windows x64 | `hardwave-analyser-windows-x64.zip` |
-            | macOS Apple Silicon | `hardwave-analyser-macos-arm64.zip` |
-            | macOS Intel | `hardwave-analyser-macos-x64.zip` |
+            | macOS (Universal) | `hardwave-analyser-macos-universal.zip` |
 
             ### Installation
 
