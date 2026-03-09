@@ -13,8 +13,8 @@ mod params;
 mod protocol;
 mod websocket;
 
-use crossbeam_channel::{bounded, Sender};
 use nih_plug::prelude::*;
+use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Instant;
@@ -31,8 +31,8 @@ pub struct HardwaveAnalyser {
     /// WebSocket client for streaming to the desktop app
     ws_client: WebSocketClient,
 
-    /// Sender for the editor webview (gui feature)
-    editor_packet_tx: Sender<AudioPacket>,
+    /// Shared slot for the latest FFT packet (written by audio thread, read by editor)
+    packet_slot: Arc<Mutex<Option<AudioPacket>>>,
 
     /// Editor instance (created once, reused)
     #[cfg(feature = "gui")]
@@ -68,15 +68,15 @@ pub struct HardwaveAnalyser {
 
 impl Default for HardwaveAnalyser {
     fn default() -> Self {
-        let (editor_packet_tx, _editor_packet_rx) = bounded::<AudioPacket>(32);
+        let packet_slot: Arc<Mutex<Option<AudioPacket>>> = Arc::new(Mutex::new(None));
 
         Self {
             params: Arc::new(HardwaveAnalyserParams::default()),
             ws_client: WebSocketClient::new(),
-            editor_packet_tx,
+            packet_slot: Arc::clone(&packet_slot),
             #[cfg(feature = "gui")]
             editor_instance: {
-                Some(editor::HardwaveAnalyserEditor::new(_editor_packet_rx))
+                Some(editor::HardwaveAnalyserEditor::new(packet_slot))
             },
             fft_left: FftProcessor::new(),
             fft_right: FftProcessor::new(),
@@ -288,16 +288,8 @@ impl HardwaveAnalyser {
         // Send to WebSocket (desktop app)
         self.ws_client.send(packet.clone());
 
-        // Send to editor webview (non-blocking, drops if full)
-        match self.editor_packet_tx.try_send(packet) {
-            Ok(_) => {},
-            Err(crossbeam_channel::TrySendError::Full(_)) => {
-                Self::debug_log("editor channel FULL — dropping packet");
-            },
-            Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
-                Self::debug_log("editor channel DISCONNECTED — no receivers");
-            },
-        }
+        // Write latest packet to shared slot (editor thread takes it when ready)
+        *self.packet_slot.lock() = Some(packet);
     }
 }
 

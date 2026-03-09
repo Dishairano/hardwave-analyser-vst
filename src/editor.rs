@@ -7,7 +7,6 @@
 //! custom-protocol interception issues in wry 0.46.
 
 use base64::Engine as _;
-use crossbeam_channel::Receiver;
 use nih_plug::prelude::*;
 use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -265,7 +264,7 @@ struct SendWebView(wry::WebView);
 unsafe impl Send for SendWebView {}
 
 pub struct HardwaveAnalyserEditor {
-    packet_rx: Receiver<AudioPacket>,
+    packet_slot: Arc<Mutex<Option<AudioPacket>>>,
     auth_token: Arc<Mutex<Option<String>>>,
     size: (u32, u32),
     /// Debug log snapshot captured at plugin load time (before the UI is opened),
@@ -274,7 +273,7 @@ pub struct HardwaveAnalyserEditor {
 }
 
 impl HardwaveAnalyserEditor {
-    pub fn new(packet_rx: Receiver<AudioPacket>) -> Self {
+    pub fn new(packet_slot: Arc<Mutex<Option<AudioPacket>>>) -> Self {
         let token = auth::load_token();
         // Read the debug log now (plugin load time, background context) so
         // spawn() — which runs on the DAW's UI thread — doesn't block on disk I/O.
@@ -315,7 +314,7 @@ impl HardwaveAnalyserEditor {
         }
 
         Self {
-            packet_rx,
+            packet_slot,
             auth_token: Arc::new(Mutex::new(token)),
             size: (EDITOR_WIDTH, EDITOR_HEIGHT),
             cached_debug_log_b64,
@@ -349,7 +348,7 @@ impl HardwaveAnalyserEditor {
 /// The server runs until `running` is set to false (EditorHandle dropped).
 #[cfg(target_os = "windows")]
 fn start_packet_server(
-    packet_rx: Receiver<crate::protocol::AudioPacket>,
+    packet_slot: Arc<Mutex<Option<crate::protocol::AudioPacket>>>,
     running: Arc<AtomicBool>,
 ) -> u16 {
     use std::io::{Read, Write};
@@ -365,33 +364,15 @@ fn start_packet_server(
     let port = listener.local_addr().map(|a| a.port()).unwrap_or(0);
 
     thread::spawn(move || {
-        // Shared storage for the latest packet.
-        let latest: Arc<Mutex<Option<crate::protocol::AudioPacket>>> =
-            Arc::new(Mutex::new(None));
-
-        // Drainer thread: keeps `latest` current from the crossbeam channel.
-        {
-            let latest_w = Arc::clone(&latest);
-            let running_d = Arc::clone(&running);
-            thread::spawn(move || {
-                while running_d.load(Ordering::Relaxed) {
-                    while let Ok(p) = packet_rx.try_recv() {
-                        *latest_w.lock() = Some(p);
-                    }
-                    thread::sleep(Duration::from_millis(4));
-                }
-            });
-        }
-
         // HTTP accept loop (non-blocking so we can check `running`).
         listener.set_nonblocking(true).ok();
         while running.load(Ordering::Relaxed) {
             match listener.accept() {
                 Ok((mut stream, _)) => {
                     let body = {
-                        let guard = latest.lock();
-                        match guard.as_ref() {
-                            Some(p) => serde_json::to_string(p)
+                        // Take the latest packet from the shared slot.
+                        match packet_slot.lock().take() {
+                            Some(p) => serde_json::to_string(&p)
                                 .unwrap_or_else(|_| "null".to_string()),
                             None => "null".to_string(),
                         }
@@ -436,7 +417,7 @@ impl Editor for HardwaveAnalyserEditor {
         parent: ParentWindowHandle,
         _context: Arc<dyn GuiContext>,
     ) -> Box<dyn std::any::Any + Send> {
-        let packet_rx = self.packet_rx.clone();
+        let packet_slot = Arc::clone(&self.packet_slot);
         let running = Arc::new(AtomicBool::new(true));
         let auth_token = Arc::clone(&self.auth_token);
         let url = self.build_url();
@@ -461,10 +442,6 @@ impl Editor for HardwaveAnalyserEditor {
             let mut sw = Stopwatch::new("spawn() start");
 
             // Drain any backlogged packets from the previous session so the
-            // channel doesn't stay full and spam the log.
-            while self.packet_rx.try_recv().is_ok() {}
-            sw.mark("channel drained");
-
             let parent_hwnd = match parent {
                 ParentWindowHandle::Win32Hwnd(h) => h as usize,
                 _ => 0,
@@ -500,7 +477,7 @@ impl Editor for HardwaveAnalyserEditor {
 
             // Start the local HTTP server that serves FFT packets as JSON.
             // JS polls http://127.0.0.1:{port}/ at ~60fps.
-            let server_port = start_packet_server(packet_rx.clone(), Arc::clone(&running));
+            let server_port = start_packet_server(Arc::clone(&packet_slot), Arc::clone(&running));
             sw.mark(&format!("packet server bound (port {})", server_port));
 
             let init_script = format!(
@@ -737,12 +714,7 @@ impl Editor for HardwaveAnalyserEditor {
                 match webview {
                     Ok(webview) => {
                         while running_clone.load(Ordering::Relaxed) {
-                            let mut latest: Option<AudioPacket> = None;
-                            while let Ok(packet) = packet_rx.try_recv() {
-                                latest = Some(packet);
-                            }
-
-                            if let Some(packet) = latest {
+                            if let Some(packet) = packet_slot.lock().take() {
                                 let json = serde_json::to_string(&packet).unwrap_or_default();
                                 let js = format!(
                                     "window.__onAudioPacket && window.__onAudioPacket({})",
