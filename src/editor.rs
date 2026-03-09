@@ -281,34 +281,28 @@ impl HardwaveAnalyserEditor {
         // spawn() — which runs on the DAW's UI thread — doesn't block on disk I/O.
         let cached_debug_log_b64 = read_debug_log_b64();
 
-        // Pre-warm WebView2 check and clean up stale session dirs in the background
+        // Pre-warm WebView2 check and clean up legacy session dirs in the background
         // so neither blocks the DAW's UI thread when the user opens the plugin window.
         #[cfg(target_os = "windows")]
         {
             std::thread::spawn(|| {
-                // 1) Run the WebView2 reg check once so WEBVIEW2_ENSURED is already
-                //    set by the time spawn() is called — avoids ~5 s reg.exe delay.
+                // Run the WebView2 reg check once so WEBVIEW2_ENSURED is already
+                // set by the time spawn() is called — avoids ~5 s reg.exe delay.
                 ensure_webview2();
 
-                // 2) Clean up stale WebView2 session directories (older than 120 s).
-                //    Doing this in new() (plugin load) rather than spawn() (UI open)
-                //    means it doesn't eat into the perceived open latency.
+                // Clean up legacy session directories (s<timestamp>) from older versions.
+                // v0.9.2+ uses fixed slot_a/slot_b dirs instead.
                 let base_dir = dirs::data_local_dir()
                     .unwrap_or_else(std::env::temp_dir)
                     .join("Hardwave")
                     .join("WebView2");
                 if let Ok(entries) = std::fs::read_dir(&base_dir) {
                     for entry in entries.flatten() {
-                        if let Ok(meta) = entry.metadata() {
-                            if let Ok(modified) = meta.modified() {
-                                if let Ok(age) =
-                                    std::time::SystemTime::now().duration_since(modified)
-                                {
-                                    if age.as_secs() > 120 {
-                                        let _ = std::fs::remove_dir_all(entry.path());
-                                    }
-                                }
-                            }
+                        let name = entry.file_name();
+                        let name = name.to_string_lossy();
+                        // Only delete old "s<timestamp>" dirs, leave slot_a/slot_b alone
+                        if name.starts_with('s') && name[1..].chars().all(|c| c.is_ascii_digit()) {
+                            let _ = std::fs::remove_dir_all(entry.path());
                         }
                     }
                 }
@@ -466,22 +460,24 @@ impl Editor for HardwaveAnalyserEditor {
             ensure_webview2();
             sw.mark("ensure_webview2()");
 
-            // Give each spawn its own unique data directory so we never block
-            // waiting for the previous WebView2 browser process to release its
-            // directory lock (the lock is held for several seconds after the
-            // window closes, causing a 5-6 s stall on double-spawn by the DAW).
-            // Old session directories are cleaned up here before creating the new one.
+            // Ping-pong between two fixed data directories (slot_a / slot_b).
+            // This gives us BOTH fast cached loads AND avoids the 5-6 s lock
+            // stall on rapid close-reopen:
+            //   Open 1 → slot_a (cold on first ever use, warm after that)
+            //   Open 2 → slot_b (slot_a lock releasing in background)
+            //   Open 3 → slot_a (warm — lock released during slot_b session)
+            // After the first two opens, every subsequent open hits warm cache.
+            static DATA_DIR_SLOT: std::sync::atomic::AtomicU8 =
+                std::sync::atomic::AtomicU8::new(0);
+            let slot = DATA_DIR_SLOT.fetch_xor(1, Ordering::Relaxed);
+
             let base_dir = dirs::data_local_dir()
                 .unwrap_or_else(std::env::temp_dir)
                 .join("Hardwave")
                 .join("WebView2");
-            let session_ts = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-
-            let data_dir = base_dir.join(format!("s{}", session_ts));
+            let data_dir = base_dir.join(if slot == 0 { "slot_a" } else { "slot_b" });
             let _ = std::fs::create_dir_all(&data_dir);
+            debug_log(&format!("Using WebView2 data dir: {:?} (slot {})", data_dir, slot));
             sw.mark("data dir ready");
 
             let mut web_context = wry::WebContext::new(Some(data_dir));
