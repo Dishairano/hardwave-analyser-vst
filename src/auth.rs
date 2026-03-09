@@ -1,20 +1,46 @@
-//! Token persistence for the VST webview editor.
+//! Token and subscription-cache persistence for the VST webview editor.
 //!
-//! Stores the user's JWT at `~/.hardwave/vst-token` so they don't have to
-//! log in every time the plugin window is opened.
+//! - JWT auth token: `~/.hardwave/vst-token`
+//! - Subscription cache: `~/.hardwave/sub-cache`
+//!
+//! The sub-cache stores a server-issued Ed25519-signed token (not a plain
+//! timestamp). The private key never leaves the server. The public key is
+//! embedded here. Forging the cache requires the server's private key —
+//! editing the file on disk is not enough.
 
 use std::fs;
 use std::path::PathBuf;
 
-/// Get the path to the token file.
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+
+/// Ed25519 public key — generated once, private key stored in server .env only.
+/// To rotate: generate a new keypair, update this constant, redeploy server with new private key.
+const PUBLIC_KEY: [u8; 32] = [
+    0x22, 0x8b, 0xb9, 0x2b, 0x1b, 0x54, 0x81, 0x12,
+    0x3b, 0x57, 0x78, 0x3f, 0x2b, 0xc4, 0x9a, 0x94,
+    0xd5, 0xb6, 0x0b, 0xac, 0xcb, 0x0c, 0x05, 0xa6,
+    0x20, 0x58, 0xef, 0x5b, 0xc8, 0x23, 0x32, 0xef,
+];
+
+fn hardwave_dir() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join(".hardwave"))
+}
+
 fn token_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".hardwave").join("vst-token"))
+    hardwave_dir().map(|d| d.join("vst-token"))
+}
+
+fn sub_cache_path() -> Option<PathBuf> {
+    hardwave_dir().map(|d| d.join("sub-cache"))
 }
 
 /// Load a previously-saved JWT token from disk.
 pub fn load_token() -> Option<String> {
     let path = token_path()?;
-    fs::read_to_string(path).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+    fs::read_to_string(path)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 /// Save a JWT token to disk.
@@ -30,4 +56,92 @@ pub fn save_token(token: &str) {
             let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
         }
     }
+}
+
+/// Verify and load the subscription cache.
+///
+/// The cache file contains a server-signed offline token in the format:
+///   `<base64_signature>.<base64_payload>`
+/// where payload is the UTF-8 string `<userId>:<exp_unix_secs>`.
+///
+/// Returns `true` only if:
+///   1. The file exists and parses correctly
+///   2. The Ed25519 signature is valid against the embedded public key
+///   3. The expiry timestamp has not passed
+///
+/// Called at plugin startup — result is injected as `window.__HARDWAVE_SUB_VALID`
+/// before the WebView loads. JS reads it but cannot set it from DevTools.
+pub fn load_sub_cache() -> bool {
+    let raw = match sub_cache_path().and_then(|p| fs::read_to_string(p).ok()) {
+        Some(s) => s.trim().to_string(),
+        None => return false,
+    };
+
+    let (sig_b64, payload_b64) = match raw.split_once('.') {
+        Some(parts) => parts,
+        None => return false,
+    };
+
+    let sig_bytes = match base64_decode(sig_b64) {
+        Some(b) => b,
+        None => return false,
+    };
+    let payload_bytes = match base64_decode(payload_b64) {
+        Some(b) => b,
+        None => return false,
+    };
+
+    // Verify Ed25519 signature
+    let vk = match VerifyingKey::from_bytes(&PUBLIC_KEY) {
+        Ok(k) => k,
+        Err(_) => return false,
+    };
+    let sig_arr: [u8; 64] = match sig_bytes.try_into() {
+        Ok(a) => a,
+        Err(_) => return false,
+    };
+    let sig = Signature::from_bytes(&sig_arr);
+    if vk.verify(&payload_bytes, &sig).is_err() {
+        return false;
+    }
+
+    // Parse payload: "<userId>:<exp>"
+    let payload_str = match std::str::from_utf8(&payload_bytes) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let exp: u64 = match payload_str.split_once(':').and_then(|(_, e)| e.parse().ok()) {
+        Some(t) => t,
+        None => return false,
+    };
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    now < exp
+}
+
+/// Save a server-signed offline token to disk, or delete the cache if empty.
+/// The token format is `<base64_sig>.<base64_payload>` — produced by the server.
+pub fn save_sub_cache(signed_token: &str) {
+    let path = match sub_cache_path() {
+        Some(p) => p,
+        None => return,
+    };
+    if signed_token.is_empty() {
+        let _ = fs::remove_file(&path);
+        return;
+    }
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(path, signed_token);
+}
+
+/// Minimal base64 decode (standard alphabet, handles padding).
+fn base64_decode(s: &str) -> Option<Vec<u8>> {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.decode(s).ok()
 }

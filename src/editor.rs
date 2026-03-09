@@ -322,19 +322,32 @@ impl HardwaveAnalyserEditor {
     }
 
     fn build_url(&self) -> String {
-        ANALYSER_URL.to_string()
-    }
-
-    fn token_init_script(&self) -> String {
         let token = self.auth_token.lock();
         match token.as_deref() {
+            Some(t) => format!("{}?token={}", ANALYSER_URL, t),
+            None => ANALYSER_URL.to_string(),
+        }
+    }
+
+    /// Returns JS that injects auth globals before the page loads.
+    fn globals_init_script(&self) -> String {
+        let token = self.auth_token.lock();
+        let token_js = match token.as_deref() {
             Some(t) => {
-                // Escape backslashes and backticks so the token is safe to embed in JS.
                 let escaped = t.replace('\\', "\\\\").replace('`', "\\`");
                 format!("window.__hardwave_token = `{}`;", escaped)
             }
             None => "window.__hardwave_token = null;".to_string(),
-        }
+        };
+        let sub_valid = auth::load_sub_cache();
+        format!(
+            r#"
+            window.__HARDWAVE_SUB_VALID = {sub_valid};
+            {token_js}
+            "#,
+            sub_valid = sub_valid,
+            token_js = token_js,
+        )
     }
 }
 
@@ -421,7 +434,7 @@ impl Editor for HardwaveAnalyserEditor {
         let running = Arc::new(AtomicBool::new(true));
         let auth_token = Arc::clone(&self.auth_token);
         let url = self.build_url();
-        let token_script = self.token_init_script();
+        let globals_script = self.globals_init_script();
         let debug_log_b64 = self.cached_debug_log_b64.clone();
 
         // ---------------------------------------------------------------
@@ -490,12 +503,15 @@ impl Editor for HardwaveAnalyserEditor {
                 }});
 
                 window.__HARDWAVE_VST = true;
-                {token_script}
+                {globals_script}
                 window.__hardwave = {{
                     version: "{version}",
                     os: "{os}",
                     saveToken: function(token) {{
                         window.ipc.postMessage('saveToken:' + token);
+                    }},
+                    saveSubCache: function(signedToken) {{
+                        window.ipc.postMessage('saveSubCache:' + (signedToken || ''));
                     }}
                 }};
                 window.__HARDWAVE_DEBUG_LOG = "{debug_log}";
@@ -579,7 +595,7 @@ impl Editor for HardwaveAnalyserEditor {
                     }}
                 }})();
                 "#,
-                token_script = token_script,
+                globals_script = globals_script,
                 version = env!("CARGO_PKG_VERSION"),
                 os = PLUGIN_OS,
                 debug_log = debug_log_b64,
@@ -602,12 +618,19 @@ impl Editor for HardwaveAnalyserEditor {
                 .with_visible(true)
                 .with_focused(true)
                 .with_url(&url)
+                .with_navigation_handler(|url: String| {
+                    url.starts_with("https://hardwavestudios.com/") ||
+                    url.starts_with("https://analyser.hardwavestudios.com/") ||
+                    url.starts_with("http://127.0.0.1:")
+                })
                 .with_ipc_handler(move |req: wry::http::Request<String>| {
                     let msg = req.body().as_str();
                     if let Some(token) = msg.strip_prefix("saveToken:") {
                         let token = token.trim().to_string();
                         auth::save_token(&token);
                         *ipc_auth_token.lock() = Some(token);
+                    } else if let Some(signed) = msg.strip_prefix("saveSubCache:") {
+                        auth::save_sub_cache(signed.trim());
                     } else if let Some(info) = msg.strip_prefix("debug:") {
                         debug_log(&format!("[js] {}", info));
                     }
@@ -677,12 +700,19 @@ impl Editor for HardwaveAnalyserEditor {
                     .with_visible(true)
                     .with_focused(true)
                     .with_url(&url)
+                    .with_devtools(false)
+                    .with_navigation_handler(|url: String| {
+                        url.starts_with("https://hardwavestudios.com/") ||
+                        url.starts_with("https://analyser.hardwavestudios.com/")
+                    })
                     .with_ipc_handler(move |req: wry::http::Request<String>| {
                         let msg = req.body().as_str();
                         if let Some(token) = msg.strip_prefix("saveToken:") {
                             let token = token.trim().to_string();
                             auth::save_token(&token);
                             *ipc_auth_token.lock() = Some(token);
+                        } else if let Some(signed) = msg.strip_prefix("saveSubCache:") {
+                            auth::save_sub_cache(signed.trim());
                         }
                     })
                     .with_initialization_script(&format!(
@@ -694,17 +724,20 @@ impl Editor for HardwaveAnalyserEditor {
                         }});
 
                         window.__HARDWAVE_VST = true;
-                        {token_script}
+                        {globals_script}
                         window.__hardwave = {{
                             version: "{version}",
                             os: "{os}",
                             saveToken: function(token) {{
                                 window.ipc.postMessage('saveToken:' + token);
+                            }},
+                            saveSubCache: function(signedToken) {{
+                                window.ipc.postMessage('saveSubCache:' + (signedToken || ''));
                             }}
                         }};
                         window.__HARDWAVE_DEBUG_LOG = "{debug_log}";
                         "#,
-                        token_script = token_script,
+                        globals_script = globals_script,
                         version = env!("CARGO_PKG_VERSION"),
                         os = PLUGIN_OS,
                         debug_log = debug_log_b64,

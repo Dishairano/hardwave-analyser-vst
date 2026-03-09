@@ -42,6 +42,9 @@ parking_lot = "0.12"
 # Atomic float operations
 atomic_float = "1"
 
+# Ed25519 signature verification for offline subscription cache
+ed25519-dalek = { version = "2", default-features = false }
+
 # GTK for Linux webview event loop
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = { version = "0.18", optional = true }
