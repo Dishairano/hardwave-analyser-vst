@@ -177,7 +177,9 @@ const EDITOR_WIDTH: u32 = 1100;
 const EDITOR_HEIGHT: u32 = 700;
 
 /// Base URL for the analyser page.
-const ANALYSER_URL: &str = "https://hardwavestudios.com/vst/analyser";
+/// Points directly at the analyser subdomain to skip the 307 redirect from
+/// the main domain — faster load and guaranteed query-param preservation.
+const ANALYSER_URL: &str = "https://analyser.hardwavestudios.com/vst/analyser";
 
 // ---------------------------------------------------------------------------
 // raw-window-handle 0.5 (nih-plug) → 0.6 (wry) bridge

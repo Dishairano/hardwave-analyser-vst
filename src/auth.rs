@@ -23,7 +23,35 @@ const PUBLIC_KEY: [u8; 32] = [
 ];
 
 fn hardwave_dir() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".hardwave"))
+    // Primary: ~/.hardwave (works on all platforms)
+    if let Some(home) = dirs::home_dir() {
+        return Some(home.join(".hardwave"));
+    }
+    // Windows fallback: %APPDATA%\.hardwave if home_dir() fails
+    #[cfg(target_os = "windows")]
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        return Some(PathBuf::from(appdata).join(".hardwave"));
+    }
+    debug_log("[auth] hardwave_dir: could not determine home directory");
+    None
+}
+
+/// Write a line to the debug log (same file as editor.rs).
+#[allow(unused)]
+fn debug_log(msg: &str) {
+    use std::io::Write;
+    let path = {
+        let mut p = std::env::temp_dir();
+        p.push("hardwave-debug.log");
+        p
+    };
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let _ = writeln!(f, "[{}] {}", now, msg);
+    }
 }
 
 fn token_path() -> Option<PathBuf> {
@@ -37,24 +65,48 @@ fn sub_cache_path() -> Option<PathBuf> {
 /// Load a previously-saved JWT token from disk.
 pub fn load_token() -> Option<String> {
     let path = token_path()?;
-    fs::read_to_string(path)
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+    match fs::read_to_string(&path) {
+        Ok(s) => {
+            let t = s.trim().to_string();
+            if t.is_empty() {
+                debug_log(&format!("[auth] load_token: file empty at {:?}", path));
+                None
+            } else {
+                debug_log(&format!("[auth] load_token: loaded {} bytes from {:?}", t.len(), path));
+                Some(t)
+            }
+        }
+        Err(e) => {
+            debug_log(&format!("[auth] load_token: read failed {:?}: {}", path, e));
+            None
+        }
+    }
 }
 
 /// Save a JWT token to disk.
 pub fn save_token(token: &str) {
     if let Some(path) = token_path() {
         if let Some(parent) = path.parent() {
-            let _ = fs::create_dir_all(parent);
+            if let Err(e) = fs::create_dir_all(parent) {
+                debug_log(&format!("[auth] save_token: mkdir failed {:?}: {}", parent, e));
+                return;
+            }
         }
-        let _ = fs::write(&path, token);
+        match fs::write(&path, token) {
+            Ok(()) => {
+                debug_log(&format!("[auth] save_token: wrote {} bytes to {:?}", token.len(), path));
+            }
+            Err(e) => {
+                debug_log(&format!("[auth] save_token: write failed {:?}: {}", path, e));
+            }
+        }
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
         }
+    } else {
+        debug_log("[auth] save_token: no token path available");
     }
 }
 
