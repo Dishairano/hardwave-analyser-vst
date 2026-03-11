@@ -595,7 +595,7 @@ impl Editor for HardwaveAnalyserEditor {
                                         dbg('fetch error #' + _fetchErr + ': ' + e);
                                     }}
                                 }})
-                                .finally(function() {{ requestAnimationFrame(poll); }});
+                                .finally(function() {{ setTimeout(poll, 16); }});
                         }})();
                     }}
 
