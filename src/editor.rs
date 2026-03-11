@@ -378,31 +378,44 @@ fn start_packet_server(
         while running.load(Ordering::Relaxed) {
             match listener.accept() {
                 Ok((mut stream, _)) => {
-                    let body = {
-                        // Take the latest packet from the shared slot.
-                        match packet_slot.lock().take() {
-                            Some(p) => serde_json::to_string(&p)
-                                .unwrap_or_else(|_| "null".to_string()),
-                            None => "null".to_string(),
-                        }
-                    };
-                    // Drain the incoming HTTP request bytes (ignore them).
+                    // Read the HTTP request to detect method (GET vs OPTIONS preflight).
                     stream.set_read_timeout(Some(Duration::from_millis(10))).ok();
                     let mut buf = [0u8; 1024];
-                    let _ = stream.read(&mut buf);
-                    // Write minimal HTTP response.
-                    let resp = format!(
-                        "HTTP/1.1 200 OK\r\n\
-                         Content-Type: application/json\r\n\
+                    let n = stream.read(&mut buf).unwrap_or(0);
+                    let is_options = n >= 7 && &buf[..7] == b"OPTIONS";
+
+                    let resp = if is_options {
+                        // CORS preflight response — no body needed.
+                        "HTTP/1.1 204 No Content\r\n\
                          Access-Control-Allow-Origin: *\r\n\
-                         Cache-Control: no-store\r\n\
+                         Access-Control-Allow-Methods: GET, OPTIONS\r\n\
+                         Access-Control-Allow-Headers: *\r\n\
+                         Access-Control-Max-Age: 86400\r\n\
+                         Content-Length: 0\r\n\
                          Connection: close\r\n\
-                         Content-Length: {}\r\n\
-                         \r\n\
-                         {}",
-                        body.len(),
-                        body
-                    );
+                         \r\n".to_string()
+                    } else {
+                        let body = {
+                            // Take the latest packet from the shared slot.
+                            match packet_slot.lock().take() {
+                                Some(p) => serde_json::to_string(&p)
+                                    .unwrap_or_else(|_| "null".to_string()),
+                                None => "null".to_string(),
+                            }
+                        };
+                        format!(
+                            "HTTP/1.1 200 OK\r\n\
+                             Content-Type: application/json\r\n\
+                             Access-Control-Allow-Origin: *\r\n\
+                             Cache-Control: no-store\r\n\
+                             Connection: close\r\n\
+                             Content-Length: {}\r\n\
+                             \r\n\
+                             {}",
+                            body.len(),
+                            body
+                        )
+                    };
                     stream.set_write_timeout(Some(Duration::from_millis(100))).ok();
                     let _ = stream.write_all(resp.as_bytes());
                 }
