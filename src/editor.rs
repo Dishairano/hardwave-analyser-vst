@@ -375,9 +375,14 @@ fn start_packet_server(
     thread::spawn(move || {
         // HTTP accept loop (non-blocking so we can check `running`).
         listener.set_nonblocking(true).ok();
+        let mut conn_count: u64 = 0;
         while running.load(Ordering::Relaxed) {
             match listener.accept() {
                 Ok((mut stream, _)) => {
+                    conn_count += 1;
+                    if conn_count <= 3 || conn_count % 300 == 0 {
+                        debug_log(&format!("packet server: conn #{} from JS", conn_count));
+                    }
                     // Read the HTTP request to detect method (GET vs OPTIONS preflight).
                     stream.set_read_timeout(Some(Duration::from_millis(10))).ok();
                     let mut buf = [0u8; 1024];
@@ -621,7 +626,8 @@ impl Editor for HardwaveAnalyserEditor {
             let webview = wry::WebViewBuilder::with_web_context(&mut web_context)
                 .with_additional_browser_args(
                     "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection \
-                     --allow-insecure-localhost"
+                     --allow-insecure-localhost \
+                     --disable-web-security"
                 )
                 .with_devtools(false)
                 .with_transparent(false)
