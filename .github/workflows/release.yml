@@ -1,0 +1,202 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag (e.g., v0.1.0)'
+        required: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-linux:
+    runs-on: [self-hosted, linux, x64]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Build
+        run: cargo xtask bundle hardwave-analyser --release
+
+      - name: Package
+        run: |
+          cd target/bundled
+          tar -czvf hardwave-analyser-linux-x64.tar.gz hardwave-analyser.vst3 hardwave-analyser.clap
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: hardwave-analyser-linux-x64
+          path: target/bundled/hardwave-analyser-linux-x64.tar.gz
+
+  build-windows:
+    runs-on: [self-hosted, linux, x64]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust + Windows MSVC target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Install cargo-xwin
+        run: cargo install cargo-xwin --locked
+
+      - name: Build (MSVC cross-compile, with GUI)
+        run: cargo xwin build --release --target x86_64-pc-windows-msvc -p hardwave-analyser
+
+      - name: Bundle VST3 and CLAP
+        run: |
+          DLL=target/x86_64-pc-windows-msvc/release/hardwave_analyser.dll
+          # VST3 bundle
+          mkdir -p target/bundled/hardwave-analyser.vst3/Contents/x86_64-win
+          cp "$DLL" target/bundled/hardwave-analyser.vst3/Contents/x86_64-win/hardwave-analyser.vst3
+          # CLAP bundle
+          cp "$DLL" target/bundled/hardwave-analyser.clap
+
+      - name: Package
+        run: |
+          cd target/bundled
+          zip -r hardwave-analyser-windows-x64.zip hardwave-analyser.vst3 hardwave-analyser.clap
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: hardwave-analyser-windows-x64
+          path: target/bundled/hardwave-analyser-windows-x64.zip
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust (both macOS targets)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Build (Apple Silicon)
+        run: |
+          cargo xtask bundle hardwave-analyser --release
+          cp target/bundled/hardwave-analyser.vst3/Contents/MacOS/hardwave-analyser /tmp/hw-arm64-vst3
+          cp target/bundled/hardwave-analyser.clap/Contents/MacOS/hardwave-analyser /tmp/hw-arm64-clap
+
+      - name: Build (Intel, cross-compile)
+        run: cargo xtask bundle hardwave-analyser --release --target x86_64-apple-darwin
+
+      - name: Create universal binaries with lipo
+        run: |
+          lipo -create \
+            /tmp/hw-arm64-vst3 \
+            target/bundled/hardwave-analyser.vst3/Contents/MacOS/hardwave-analyser \
+            -output target/bundled/hardwave-analyser.vst3/Contents/MacOS/hardwave-analyser
+          lipo -create \
+            /tmp/hw-arm64-clap \
+            target/bundled/hardwave-analyser.clap/Contents/MacOS/hardwave-analyser \
+            -output target/bundled/hardwave-analyser.clap/Contents/MacOS/hardwave-analyser
+
+      - name: Package
+        run: |
+          cd target/bundled
+          zip -r hardwave-analyser-macos-universal.zip hardwave-analyser.vst3 hardwave-analyser.clap
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: hardwave-analyser-macos-universal
+          path: target/bundled/hardwave-analyser-macos-universal.zip
+
+  release:
+    needs: [build-linux, build-windows, build-macos]
+    runs-on: [self-hosted, linux, x64]
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: List artifacts
+        run: find artifacts -type f
+
+      - name: Get version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          name: Hardwave Analyser ${{ steps.version.outputs.version }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: |
+            artifacts/hardwave-analyser-linux-x64/*.tar.gz
+            artifacts/hardwave-analyser-windows-x64/*.zip
+            artifacts/hardwave-analyser-macos-universal/*.zip
+          body: |
+            ## Hardwave Analyser ${{ steps.version.outputs.version }}
+
+            VST3/CLAP spectrum analyser plugin — powered by Hardwave Studios.
+
+            ### Downloads
+
+            | Platform | File |
+            |----------|------|
+            | Linux x64 | `hardwave-analyser-linux-x64.tar.gz` |
+            | Windows x64 | `hardwave-analyser-windows-x64.zip` |
+            | macOS (Universal) | `hardwave-analyser-macos-universal.zip` |
+
+            ### Installation
+
+            **Windows:**
+            1. Extract the zip
+            2. Copy `hardwave-analyser.vst3` folder to `C:\Program Files\Common Files\VST3\`
+            3. Copy `hardwave-analyser.clap` to `C:\Program Files\Common Files\CLAP\`
+
+            **Linux:**
+            1. Extract: `tar -xzf hardwave-analyser-linux-x64.tar.gz`
+            2. Copy to `~/.vst3/` and `~/.clap/`
+
+            **macOS:**
+            1. Extract the zip
+            2. Copy `hardwave-analyser.vst3` to `~/Library/Audio/Plug-Ins/VST3/`
+            3. Copy `hardwave-analyser.clap` to `~/Library/Audio/Plug-Ins/CLAP/`
+
+            > **Note:** On first launch macOS may show a security warning. Right-click the plugin in Finder and choose Open, or go to System Settings → Privacy & Security and click Allow.
+
+            ### Usage
+
+            1. Add **Hardwave Analyser** to any channel in your DAW
+            2. The plugin opens an embedded spectrum analyser (requires Hardwave Pro subscription)
+            3. Log in once — credentials are saved locally
+
+      - name: Sync version to website DB
+        run: |
+          curl -sf -X POST https://hardwavestudios.com/api/internal/sync-version \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer ${{ secrets.INTERNAL_API_SECRET }}" \
+            -d "{\"slug\":\"analyser\",\"version\":\"${{ steps.version.outputs.version }}\"}"
