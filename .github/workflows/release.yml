@@ -200,3 +200,26 @@ jobs:
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer ${{ secrets.INTERNAL_API_SECRET }}" \
             -d "{\"slug\":\"analyser\",\"version\":\"${{ steps.version.outputs.version }}\"}"
+
+      - name: Update product database
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          VERSION_NUM="${VERSION#v}"
+
+          mkdir -p ~/.ssh
+          echo "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H 46.225.219.184 >> ~/.ssh/known_hosts 2>/dev/null
+
+          SSH="ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no root@46.225.219.184"
+
+          $SSH "docker exec hardwave-database mysql -u fl_organizer_user -p'FlOrganizer2024Secure!' fl_organizer_db -e \"
+            UPDATE products SET current_version = '${VERSION_NUM}' WHERE slug = 'analyser';
+            INSERT INTO plugin_versions (slug, version) VALUES ('analyser', '${VERSION}')
+              ON DUPLICATE KEY UPDATE version = '${VERSION}';
+          \""
+
+          echo "Database updated: analyser -> ${VERSION_NUM}"
+          rm -f ~/.ssh/deploy_key
