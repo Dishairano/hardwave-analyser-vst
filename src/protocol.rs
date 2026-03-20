@@ -78,20 +78,21 @@ impl AudioPacket {
         }
     }
 
-    /// Create a heartbeat packet
+    /// Create a heartbeat packet. Bins and wave are empty — receivers must
+    /// check packet_type before accessing those fields.
     pub fn new_heartbeat(sample_rate: u32, timestamp_ms: u64) -> Self {
         Self {
             packet_type: PACKET_TYPE_HEARTBEAT,
             sample_rate,
             timestamp_ms,
-            left_bins: vec![0.0; NUM_BINS],
-            right_bins: vec![0.0; NUM_BINS],
+            left_bins: vec![],
+            right_bins: vec![],
             left_peak: -100.0,
             right_peak: -100.0,
             left_rms: 0.0,
             right_rms: 0.0,
-            left_wave: vec![0.0; WAVE_SIZE],
-            right_wave: vec![0.0; WAVE_SIZE],
+            left_wave: vec![],
+            right_wave: vec![],
         }
     }
 

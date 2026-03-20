@@ -249,10 +249,12 @@ pub struct HardwaveAnalyserEditor {
     size: (u32, u32),
     /// Current display scale factor (stored as f32 bits for atomic access).
     scale: Arc<AtomicU32>,
+    /// Milliseconds between FFT deliveries — kept in sync with the refresh_rate param.
+    refresh_interval_ms: Arc<AtomicU32>,
 }
 
 impl HardwaveAnalyserEditor {
-    pub fn new(packet_slot: Arc<Mutex<Option<AudioPacket>>>) -> Self {
+    pub fn new(packet_slot: Arc<Mutex<Option<AudioPacket>>>, refresh_interval_ms: Arc<AtomicU32>) -> Self {
         let token = auth::load_token();
 
         // Pre-warm WebView2 check and clean up legacy session dirs in the background
@@ -288,6 +290,7 @@ impl HardwaveAnalyserEditor {
             auth_token: Arc::new(Mutex::new(token)),
             size: (EDITOR_WIDTH, EDITOR_HEIGHT),
             scale: Arc::new(AtomicU32::new(1.0f32.to_bits())),
+            refresh_interval_ms,
         }
     }
 
@@ -526,8 +529,7 @@ impl Editor for HardwaveAnalyserEditor {
             let webview = wry::WebViewBuilder::with_web_context(&mut web_context)
                 .with_additional_browser_args(
                     "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection \
-                     --allow-insecure-localhost \
-                     --disable-web-security"
+                     --allow-insecure-localhost"
                 )
                 .with_devtools(false)
                 .with_transparent(false)
@@ -584,6 +586,7 @@ impl Editor for HardwaveAnalyserEditor {
         {
             let running_clone = Arc::clone(&running);
             let scale_clone = Arc::clone(&self.scale);
+            let refresh_interval_ms_clone = Arc::clone(&self.refresh_interval_ms);
             let parent_data = match parent {
                 ParentWindowHandle::X11Window(w) => ParentData::X11(w),
                 ParentWindowHandle::AppKitNsView(v) => ParentData::AppKit(v as usize),
@@ -701,7 +704,8 @@ impl Editor for HardwaveAnalyserEditor {
                                 }
                             }
 
-                            thread::sleep(Duration::from_millis(16));
+                            let interval = refresh_interval_ms_clone.load(Ordering::Relaxed);
+                            thread::sleep(Duration::from_millis(interval as u64));
                         }
                     }
                     Err(e) => {

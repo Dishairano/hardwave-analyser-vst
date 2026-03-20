@@ -16,6 +16,7 @@ mod websocket;
 use nih_plug::prelude::*;
 use parking_lot::Mutex;
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -67,11 +68,18 @@ pub struct HardwaveAnalyser {
 
     /// Last refresh rate value (for detecting changes)
     last_refresh_rate: i32,
+
+    /// Shared interval (ms) between FFT sends, read by the editor thread for its sleep duration
+    #[cfg(feature = "gui")]
+    refresh_interval_ms: Arc<AtomicU32>,
 }
 
 impl Default for HardwaveAnalyser {
     fn default() -> Self {
         let packet_slot: Arc<Mutex<Option<AudioPacket>>> = Arc::new(Mutex::new(None));
+
+        #[cfg(feature = "gui")]
+        let refresh_interval_ms = Arc::new(AtomicU32::new(16)); // 1000 / 60Hz
 
         Self {
             params: Arc::new(HardwaveAnalyserParams::default()),
@@ -79,7 +87,10 @@ impl Default for HardwaveAnalyser {
             packet_slot: Arc::clone(&packet_slot),
             #[cfg(feature = "gui")]
             editor_instance: {
-                Some(editor::HardwaveAnalyserEditor::new(packet_slot))
+                Some(editor::HardwaveAnalyserEditor::new(
+                    packet_slot,
+                    Arc::clone(&refresh_interval_ms),
+                ))
             },
             fft_left: FftProcessor::new(),
             fft_right: FftProcessor::new(),
@@ -91,6 +102,8 @@ impl Default for HardwaveAnalyser {
             start_time: Instant::now(),
             last_port: 9847,
             last_refresh_rate: 60,
+            #[cfg(feature = "gui")]
+            refresh_interval_ms,
         }
     }
 }
@@ -191,6 +204,11 @@ impl Plugin for HardwaveAnalyser {
         if current_refresh_rate != self.last_refresh_rate {
             self.samples_per_send = (self.sample_rate / current_refresh_rate as f32) as usize;
             self.last_refresh_rate = current_refresh_rate;
+            #[cfg(feature = "gui")]
+            self.refresh_interval_ms.store(
+                (1000.0 / current_refresh_rate as f32) as u32,
+                Ordering::Relaxed,
+            );
         }
 
         // Skip processing if disabled

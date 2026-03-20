@@ -14,8 +14,8 @@ use crate::protocol::AudioPacket;
 
 /// WebSocket client that runs in a background thread
 pub struct WebSocketClient {
-    /// Sender for audio packets
-    packet_sender: Sender<AudioPacket>,
+    /// Sender for audio packets — None until start() is called
+    packet_sender: Option<Sender<AudioPacket>>,
 
     /// Flag to signal shutdown
     shutdown: Arc<AtomicBool>,
@@ -32,15 +32,11 @@ impl WebSocketClient {
     /// call `start()` after the plugin is initialised to avoid blocking DAW
     /// plugin scans.
     pub fn new() -> Self {
-        let (packet_sender, _packet_receiver) = bounded::<AudioPacket>(32);
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let server_port = Arc::new(Mutex::new(9847u16));
-
         Self {
-            packet_sender,
-            shutdown,
+            packet_sender: None,
+            shutdown: Arc::new(AtomicBool::new(false)),
             thread_handle: None,
-            server_port,
+            server_port: Arc::new(Mutex::new(9847u16)),
         }
     }
 
@@ -52,7 +48,7 @@ impl WebSocketClient {
         }
 
         let (packet_sender, packet_receiver) = bounded::<AudioPacket>(32);
-        self.packet_sender = packet_sender;
+        self.packet_sender = Some(packet_sender);
 
         let shutdown_clone = Arc::clone(&self.shutdown);
         let port_clone = Arc::clone(&self.server_port);
@@ -68,10 +64,11 @@ impl WebSocketClient {
         *p = port as u16;
     }
 
-    /// Send an audio packet (non-blocking)
+    /// Send an audio packet (non-blocking). No-op before start() is called.
     pub fn send(&self, packet: AudioPacket) {
-        // Don't block the audio thread - drop packets if queue is full
-        let _ = self.packet_sender.try_send(packet);
+        if let Some(sender) = &self.packet_sender {
+            let _ = sender.try_send(packet);
+        }
     }
 
     /// Background connection loop
