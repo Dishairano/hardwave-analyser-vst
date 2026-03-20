@@ -56,7 +56,7 @@ pub struct HardwaveAnalyser {
     /// Samples since last FFT send
     samples_since_send: usize,
 
-    /// Samples between FFT sends (for ~20Hz update rate)
+    /// Samples between FFT sends
     samples_per_send: usize,
 
     /// Plugin start time for timestamps
@@ -64,6 +64,9 @@ pub struct HardwaveAnalyser {
 
     /// Last port value (for detecting changes)
     last_port: i32,
+
+    /// Last refresh rate value (for detecting changes)
+    last_refresh_rate: i32,
 }
 
 impl Default for HardwaveAnalyser {
@@ -84,9 +87,10 @@ impl Default for HardwaveAnalyser {
             buffer_right: VecDeque::with_capacity(FFT_SIZE),
             sample_rate: 48000.0,
             samples_since_send: 0,
-            samples_per_send: 2400, // 48000 / 20 = 2400 samples for 20Hz
+            samples_per_send: 800, // 48000 / 60 = 800 samples for 60Hz default
             start_time: Instant::now(),
             last_port: 9847,
+            last_refresh_rate: 60,
         }
     }
 }
@@ -145,7 +149,9 @@ impl Plugin for HardwaveAnalyser {
         _context: &mut impl InitContext<Self>,
     ) -> bool {
         self.sample_rate = buffer_config.sample_rate;
-        self.samples_per_send = (self.sample_rate / 20.0) as usize; // 20Hz update rate
+        let refresh_rate = self.params.refresh_rate.value() as f32;
+        self.samples_per_send = (self.sample_rate / refresh_rate) as usize;
+        self.last_refresh_rate = self.params.refresh_rate.value();
 
         // Clear buffers
         self.buffer_left.clear();
@@ -178,6 +184,13 @@ impl Plugin for HardwaveAnalyser {
         if current_port != self.last_port {
             self.ws_client.set_port(current_port);
             self.last_port = current_port;
+        }
+
+        // Check if refresh rate changed
+        let current_refresh_rate = self.params.refresh_rate.value();
+        if current_refresh_rate != self.last_refresh_rate {
+            self.samples_per_send = (self.sample_rate / current_refresh_rate as f32) as usize;
+            self.last_refresh_rate = current_refresh_rate;
         }
 
         // Skip processing if disabled

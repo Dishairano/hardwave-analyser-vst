@@ -100,15 +100,15 @@ impl AudioPacket {
         bincode::serialize(self).unwrap_or_default()
     }
 
-    /// Deserialize a packet from binary format
-    pub fn from_bytes(data: &[u8]) -> Result<Self, bincode::Error> {
-        bincode::deserialize(data)
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn from_bytes(data: &[u8]) -> Result<AudioPacket, bincode::Error> {
+        bincode::deserialize(data)
+    }
 
     #[test]
     fn test_packet_roundtrip() {
@@ -126,7 +126,7 @@ mod tests {
         );
 
         let bytes = packet.to_bytes();
-        let decoded = AudioPacket::from_bytes(&bytes).unwrap();
+        let decoded = from_bytes(&bytes).unwrap();
 
         assert_eq!(decoded.packet_type, PACKET_TYPE_FFT);
         assert_eq!(decoded.sample_rate, 48000);

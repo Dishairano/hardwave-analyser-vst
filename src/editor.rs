@@ -6,10 +6,9 @@
 //! threading restriction on ICoreWebView2::ExecuteScript and the wry
 //! custom-protocol interception issues in wry 0.46.
 
-use base64::Engine as _;
 use nih_plug::prelude::*;
 use parking_lot::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -68,27 +67,6 @@ impl Stopwatch {
     }
 }
 
-/// Read the last 100 KB of the debug log and return it base64-encoded.
-/// Seeks to the end of the file so it never reads more than 100 KB regardless
-/// of how large the log has grown — safe to call at plugin construction time.
-fn read_debug_log_b64() -> String {
-    use std::io::{Read, Seek, SeekFrom};
-    const MAX: u64 = 100 * 1024; // 100 KB
-
-    let path = { let mut p = std::env::temp_dir(); p.push("hardwave-debug.log"); p };
-    let mut f = match std::fs::File::open(&path) {
-        Ok(f) => f,
-        Err(_) => return String::new(),
-    };
-    let size = f.seek(SeekFrom::End(0)).unwrap_or(0);
-    let start = size.saturating_sub(MAX);
-    if f.seek(SeekFrom::Start(start)).is_err() {
-        return String::new();
-    }
-    let mut buf = Vec::with_capacity(MAX as usize);
-    let _ = f.read_to_end(&mut buf);
-    base64::engine::general_purpose::STANDARD.encode(&buf)
-}
 
 #[cfg(target_os = "windows")] const PLUGIN_OS: &str = "windows";
 #[cfg(target_os = "macos")]   const PLUGIN_OS: &str = "macos";
@@ -269,17 +247,13 @@ pub struct HardwaveAnalyserEditor {
     packet_slot: Arc<Mutex<Option<AudioPacket>>>,
     auth_token: Arc<Mutex<Option<String>>>,
     size: (u32, u32),
-    /// Debug log snapshot captured at plugin load time (before the UI is opened),
-    /// so reading from disk never blocks the DAW's UI thread in spawn().
-    cached_debug_log_b64: String,
+    /// Current display scale factor (stored as f32 bits for atomic access).
+    scale: Arc<AtomicU32>,
 }
 
 impl HardwaveAnalyserEditor {
     pub fn new(packet_slot: Arc<Mutex<Option<AudioPacket>>>) -> Self {
         let token = auth::load_token();
-        // Read the debug log now (plugin load time, background context) so
-        // spawn() — which runs on the DAW's UI thread — doesn't block on disk I/O.
-        let cached_debug_log_b64 = read_debug_log_b64();
 
         // Pre-warm WebView2 check and clean up legacy session dirs in the background
         // so neither blocks the DAW's UI thread when the user opens the plugin window.
@@ -313,7 +287,7 @@ impl HardwaveAnalyserEditor {
             packet_slot,
             auth_token: Arc::new(Mutex::new(token)),
             size: (EDITOR_WIDTH, EDITOR_HEIGHT),
-            cached_debug_log_b64,
+            scale: Arc::new(AtomicU32::new(1.0f32.to_bits())),
         }
     }
 
@@ -609,6 +583,7 @@ impl Editor for HardwaveAnalyserEditor {
         #[cfg(not(target_os = "windows"))]
         {
             let running_clone = Arc::clone(&running);
+            let scale_clone = Arc::clone(&self.scale);
             let parent_data = match parent {
                 ParentWindowHandle::X11Window(w) => ParentData::X11(w),
                 ParentWindowHandle::AppKitNsView(v) => ParentData::AppKit(v as usize),
@@ -616,6 +591,7 @@ impl Editor for HardwaveAnalyserEditor {
             };
 
             let url = self.build_url(None);
+            let initial_scale = f32::from_bits(self.scale.load(Ordering::Relaxed));
 
             let handle = thread::spawn(move || {
                 #[cfg(all(target_os = "linux", feature = "gtk"))]
@@ -638,7 +614,10 @@ impl Editor for HardwaveAnalyserEditor {
                 let webview = wry::WebViewBuilder::new()
                     .with_bounds(wry::Rect {
                         position: wry::dpi::LogicalPosition::new(0, 0).into(),
-                        size: wry::dpi::LogicalSize::new(EDITOR_WIDTH, EDITOR_HEIGHT).into(),
+                        size: wry::dpi::LogicalSize::new(
+                            (EDITOR_WIDTH as f32 * initial_scale) as u32,
+                            (EDITOR_HEIGHT as f32 * initial_scale) as u32,
+                        ).into(),
                     })
                     .with_transparent(false)
                     .with_background_color((10, 10, 11, 255))
@@ -690,7 +669,22 @@ impl Editor for HardwaveAnalyserEditor {
 
                 match webview {
                     Ok(webview) => {
+                        let mut last_scale_bits = initial_scale.to_bits();
                         while running_clone.load(Ordering::Relaxed) {
+                            // Resize webview if the DAW reported a new scale factor.
+                            let current_scale_bits = scale_clone.load(Ordering::Relaxed);
+                            if current_scale_bits != last_scale_bits {
+                                let scale = f32::from_bits(current_scale_bits);
+                                let _ = webview.set_bounds(wry::Rect {
+                                    position: wry::dpi::LogicalPosition::new(0, 0).into(),
+                                    size: wry::dpi::LogicalSize::new(
+                                        (EDITOR_WIDTH as f32 * scale) as u32,
+                                        (EDITOR_HEIGHT as f32 * scale) as u32,
+                                    ).into(),
+                                });
+                                last_scale_bits = current_scale_bits;
+                            }
+
                             if let Some(packet) = packet_slot.lock().take() {
                                 let json = serde_json::to_string(&packet).unwrap_or_default();
                                 let js = format!(
@@ -726,10 +720,15 @@ impl Editor for HardwaveAnalyserEditor {
     }
 
     fn size(&self) -> (u32, u32) {
-        self.size
+        let scale = f32::from_bits(self.scale.load(Ordering::Relaxed));
+        (
+            (self.size.0 as f32 * scale) as u32,
+            (self.size.1 as f32 * scale) as u32,
+        )
     }
 
-    fn set_scale_factor(&self, _factor: f32) -> bool {
+    fn set_scale_factor(&self, factor: f32) -> bool {
+        self.scale.store(factor.to_bits(), Ordering::Relaxed);
         true
     }
 
