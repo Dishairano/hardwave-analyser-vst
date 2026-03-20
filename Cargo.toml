@@ -3,7 +3,7 @@ members = ["xtask"]
 
 [package]
 name = "hardwave-analyser"
-version = "0.9.3"
+version = "0.9.8"
 edition = "2021"
 authors = ["Hardwave Studios"]
 license = "MIT"

@@ -17,3 +17,8 @@ You can edit files in both this directory AND the webview directory. Use absolut
 
 ## Git Workflow
 After completing any set of changes, ALWAYS commit and push to GitHub. Do not leave changes only in the local working directory.
+
+CI only triggers on version tags (`v*`), not plain master pushes. To trigger a build, bump the version in `Cargo.toml` and push a tag (e.g. `v0.9.8`).
+
+## Branding
+Never mention Claude, Anthropic, or any AI tooling in commit messages, release notes, code comments, or any user-facing content.
