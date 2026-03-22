@@ -58,29 +58,43 @@ fn token_path() -> Option<PathBuf> {
     hardwave_dir().map(|d| d.join("vst-token"))
 }
 
+/// Token path written by the Hardwave Suite (Tauri app) on login/logout.
+/// Used as a fallback so users logged into the Suite don't need a separate
+/// Analyser login.
+fn suite_token_path() -> Option<PathBuf> {
+    dirs::data_dir().map(|d| d.join("hardwave").join("auth_token"))
+}
+
 fn sub_cache_path() -> Option<PathBuf> {
     hardwave_dir().map(|d| d.join("sub-cache"))
 }
 
 /// Load a previously-saved JWT token from disk.
+///
+/// Checks two locations in order:
+///   1. `~/.hardwave/vst-token` — written by the Analyser itself after login.
+///   2. Suite token (`data_dir/hardwave/auth_token`) — written by the Hardwave
+///      Suite on login, so users already logged into the Suite get automatic
+///      single sign-on without a separate Analyser login.
 pub fn load_token() -> Option<String> {
-    let path = token_path()?;
-    match fs::read_to_string(&path) {
-        Ok(s) => {
-            let t = s.trim().to_string();
-            if t.is_empty() {
+    let paths: &[Option<PathBuf>] = &[token_path(), suite_token_path()];
+    for path_opt in paths {
+        let Some(path) = path_opt else { continue };
+        match fs::read_to_string(path) {
+            Ok(s) => {
+                let t = s.trim().to_string();
+                if !t.is_empty() {
+                    debug_log(&format!("[auth] load_token: loaded {} bytes from {:?}", t.len(), path));
+                    return Some(t);
+                }
                 debug_log(&format!("[auth] load_token: file empty at {:?}", path));
-                None
-            } else {
-                debug_log(&format!("[auth] load_token: loaded {} bytes from {:?}", t.len(), path));
-                Some(t)
+            }
+            Err(e) => {
+                debug_log(&format!("[auth] load_token: read failed {:?}: {}", path, e));
             }
         }
-        Err(e) => {
-            debug_log(&format!("[auth] load_token: read failed {:?}: {}", path, e));
-            None
-        }
     }
+    None
 }
 
 /// Save a JWT token to disk.
