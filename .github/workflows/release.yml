@@ -152,6 +152,7 @@ jobs:
           name: Hardwave Analyser ${{ steps.version.outputs.version }}
           draft: false
           prerelease: false
+          make_latest: true
           generate_release_notes: true
           files: |
             artifacts/hardwave-analyser-linux-x64/*.tar.gz
@@ -215,8 +216,14 @@ jobs:
 
           SSH="ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no root@46.225.219.184"
 
+          BASE="https://github.com/Dishairano/hardwave-analyser-vst/releases/download/${VERSION}"
           $SSH "docker exec hardwave-database mysql -u fl_organizer_user -p'FlOrganizer2024Secure!' fl_organizer_db -e \"
-            UPDATE products SET current_version = '${VERSION_NUM}' WHERE slug = 'analyser';
+            UPDATE products SET
+              current_version = '${VERSION_NUM}',
+              download_url_windows = '${BASE}/hardwave-analyser-windows-x64.zip',
+              download_url_mac     = '${BASE}/hardwave-analyser-macos-universal.zip',
+              download_url_linux   = '${BASE}/hardwave-analyser-linux-x64.tar.gz'
+            WHERE slug = 'analyser';
             INSERT INTO plugin_versions (slug, version) VALUES ('analyser', '${VERSION}')
               ON DUPLICATE KEY UPDATE version = '${VERSION}';
           \""
