@@ -510,6 +510,9 @@ impl Editor for HardwaveAnalyserEditor {
                     }},
                     saveSubCache: function(signedToken) {{
                         window.ipc.postMessage('saveSubCache:' + (signedToken || ''));
+                    }},
+                    clearToken: function() {{
+                        window.ipc.postMessage('clearToken');
                     }}
                 }};
                 window.__HARDWAVE_DEBUG_LOG = "";
@@ -550,6 +553,9 @@ impl Editor for HardwaveAnalyserEditor {
                         *ipc_auth_token.lock() = Some(token);
                     } else if let Some(signed) = msg.strip_prefix("saveSubCache:") {
                         auth::save_sub_cache(signed.trim());
+                    } else if msg == "clearToken" {
+                        auth::clear_token();
+                        *ipc_auth_token.lock() = None;
                     } else if let Some(info) = msg.strip_prefix("debug:") {
                         debug_log(&format!("[js] {}", info));
                     }
@@ -640,6 +646,12 @@ impl Editor for HardwaveAnalyserEditor {
                             *ipc_auth_token.lock() = Some(token);
                         } else if let Some(signed) = msg.strip_prefix("saveSubCache:") {
                             auth::save_sub_cache(signed.trim());
+                        } else if msg == "clearToken" {
+                            debug_log("[auth] clearToken via IPC — deleting vst-token");
+                            if let Some(path) = token_path() {
+                                let _ = fs::remove_file(&path);
+                            }
+                            *ipc_auth_token.lock() = None;
                         }
                     })
                     .with_initialization_script(&format!(
@@ -660,6 +672,9 @@ impl Editor for HardwaveAnalyserEditor {
                             }},
                             saveSubCache: function(signedToken) {{
                                 window.ipc.postMessage('saveSubCache:' + (signedToken || ''));
+                            }},
+                            clearToken: function() {{
+                                window.ipc.postMessage('clearToken');
                             }}
                         }};
                         window.__HARDWAVE_DEBUG_LOG = "";

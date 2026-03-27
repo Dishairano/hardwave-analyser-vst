@@ -71,30 +71,50 @@ fn sub_cache_path() -> Option<PathBuf> {
 
 /// Load a previously-saved JWT token from disk.
 ///
-/// Checks two locations in order:
-///   1. `~/.hardwave/vst-token` — written by the Analyser itself after login.
-///   2. Suite token (`data_dir/hardwave/auth_token`) — written by the Hardwave
-///      Suite on login, so users already logged into the Suite get automatic
-///      single sign-on without a separate Analyser login.
+/// Checks two locations and returns the **most recently modified** token so
+/// that a fresh Suite login always wins over a stale VST-saved token:
+///   - `~/.hardwave/vst-token` — written by the Analyser itself after login.
+///   - `data_dir/hardwave/auth_token` — written by the Hardwave Suite on login.
 pub fn load_token() -> Option<String> {
-    let paths: &[Option<PathBuf>] = &[token_path(), suite_token_path()];
-    for path_opt in paths {
+    let candidates: &[Option<PathBuf>] = &[token_path(), suite_token_path()];
+
+    let mut best: Option<(String, std::time::SystemTime, PathBuf)> = None;
+
+    for path_opt in candidates {
         let Some(path) = path_opt else { continue };
-        match fs::read_to_string(path) {
-            Ok(s) => {
-                let t = s.trim().to_string();
-                if !t.is_empty() {
-                    debug_log(&format!("[auth] load_token: loaded {} bytes from {:?}", t.len(), path));
-                    return Some(t);
-                }
-                debug_log(&format!("[auth] load_token: file empty at {:?}", path));
-            }
+        let content = match fs::read_to_string(path) {
+            Ok(s) => s.trim().to_string(),
             Err(e) => {
                 debug_log(&format!("[auth] load_token: read failed {:?}: {}", path, e));
+                continue;
+            }
+        };
+        if content.is_empty() {
+            debug_log(&format!("[auth] load_token: file empty at {:?}", path));
+            continue;
+        }
+        let mtime = fs::metadata(path)
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::UNIX_EPOCH);
+
+        match &best {
+            Some((_, prev_mtime, _)) if mtime <= *prev_mtime => {
+                debug_log(&format!("[auth] load_token: skipping older {:?}", path));
+            }
+            _ => {
+                debug_log(&format!("[auth] load_token: candidate {} bytes from {:?}", content.len(), path));
+                best = Some((content, mtime, path.clone()));
             }
         }
     }
-    None
+
+    match best {
+        Some((token, _, path)) => {
+            debug_log(&format!("[auth] load_token: using {:?}", path));
+            Some(token)
+        }
+        None => None,
+    }
 }
 
 /// Save a JWT token to disk.
@@ -121,6 +141,18 @@ pub fn save_token(token: &str) {
         }
     } else {
         debug_log("[auth] save_token: no token path available");
+    }
+}
+
+/// Delete the VST-saved token from disk (called when server rejects it).
+pub fn clear_token() {
+    if let Some(path) = token_path() {
+        if path.exists() {
+            match fs::remove_file(&path) {
+                Ok(()) => debug_log(&format!("[auth] clear_token: deleted {:?}", path)),
+                Err(e) => debug_log(&format!("[auth] clear_token: failed {:?}: {}", path, e)),
+            }
+        }
     }
 }
 
