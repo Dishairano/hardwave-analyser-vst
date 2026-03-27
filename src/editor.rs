@@ -647,10 +647,7 @@ impl Editor for HardwaveAnalyserEditor {
                         } else if let Some(signed) = msg.strip_prefix("saveSubCache:") {
                             auth::save_sub_cache(signed.trim());
                         } else if msg == "clearToken" {
-                            debug_log("[auth] clearToken via IPC — deleting vst-token");
-                            if let Some(path) = token_path() {
-                                let _ = fs::remove_file(&path);
-                            }
+                            auth::clear_token();
                             *ipc_auth_token.lock() = None;
                         }
                     })
