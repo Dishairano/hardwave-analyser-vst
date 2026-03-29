@@ -3,7 +3,14 @@
 use serde::{Deserialize, Serialize};
 
 /// Number of raw FFT magnitude bins (FFT_SIZE / 2)
-pub const NUM_BINS: usize = 2048;
+pub const NUM_BINS: usize = 4096;
+
+/// Minimum analysis frequency in Hz (sub-bass visibility)
+pub const MIN_FREQ_HZ: f32 = 5.0;
+
+/// Maximum analysis frequency defaults to Nyquist (sample_rate / 2).
+/// This constant is used as a sentinel; the actual max is computed at runtime.
+pub const MAX_FREQ_HZ_DEFAULT: f32 = 0.0;
 
 /// Number of time-domain samples sent per packet for the oscilloscope
 pub const WAVE_SIZE: usize = 512;
@@ -151,8 +158,8 @@ mod tests {
         );
 
         let bytes = packet.to_bytes();
-        // 2048 bins × 2 channels × 4 bytes + 512 wave × 2 channels × 4 bytes + overhead ≈ 20.5 KB
-        assert!(bytes.len() < 24_000, "Packet too large: {} bytes", bytes.len());
+        // 4096 bins × 2 channels × 4 bytes + 512 wave × 2 channels × 4 bytes + overhead ≈ 37 KB
+        assert!(bytes.len() < 42_000, "Packet too large: {} bytes", bytes.len());
         println!("Packet size: {} bytes", bytes.len());
     }
 }

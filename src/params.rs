@@ -17,6 +17,10 @@ pub struct HardwaveAnalyserParams {
     /// FFT update rate sent to the analyser UI (60–144 Hz)
     #[id = "refresh_rate"]
     pub refresh_rate: IntParam,
+
+    /// Window function: 0=Hann, 1=Blackman-Harris, 2=Kaiser
+    #[id = "window_fn"]
+    pub window_fn: IntParam,
 }
 
 impl Default for HardwaveAnalyserParams {
@@ -42,6 +46,28 @@ impl Default for HardwaveAnalyserParams {
             .with_unit(" Hz")
             .with_value_to_string(Arc::new(|value| format!("{}", value)))
             .with_string_to_value(Arc::new(|string: &str| string.parse().ok())),
+            window_fn: IntParam::new(
+                "Window",
+                0,
+                IntRange::Linear { min: 0, max: 2 },
+            )
+            .with_unit("")
+            .with_value_to_string(Arc::new(|value| {
+                match value {
+                    0 => "Hann".to_string(),
+                    1 => "Blackman-Harris".to_string(),
+                    2 => "Kaiser".to_string(),
+                    _ => "Hann".to_string(),
+                }
+            }))
+            .with_string_to_value(Arc::new(|string: &str| {
+                match string.to_lowercase().as_str() {
+                    "hann" => Some(0),
+                    "blackman-harris" | "blackman" => Some(1),
+                    "kaiser" => Some(2),
+                    _ => None,
+                }
+            })),
         }
     }
 }

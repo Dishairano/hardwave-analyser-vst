@@ -233,8 +233,9 @@ impl Plugin for HardwaveAnalyser {
             self.buffer_left.push_back(left);
             self.buffer_right.push_back(right);
 
-            // Keep buffer at FFT_SIZE
-            if self.buffer_left.len() > FFT_SIZE {
+            // Keep buffer at FFT_SIZE * 2 for Welch's method overlap
+            let max_buf = FFT_SIZE * 2;
+            if self.buffer_left.len() > max_buf {
                 self.buffer_left.pop_front();
                 self.buffer_right.pop_front();
             }
@@ -267,14 +268,19 @@ impl HardwaveAnalyser {
 
     /// Process and send FFT data
     fn send_fft_data(&mut self) {
+        // Update window function if changed
+        let wf = fft::WindowFn::from(self.params.window_fn.value());
+        self.fft_left.set_window_fn(wf);
+        self.fft_right.set_window_fn(wf);
+
         // Make VecDeque storage contiguous so we can take a slice.
         let left_slice = self.buffer_left.make_contiguous();
         let left_bins = self.fft_left.process(left_slice, self.sample_rate);
-        let (left_peak, left_rms) = FftProcessor::calculate_levels(left_slice);
+        let (left_peak, left_rms, _left_true_peak) = FftProcessor::calculate_levels(left_slice);
 
         let right_slice = self.buffer_right.make_contiguous();
         let right_bins = self.fft_right.process(right_slice, self.sample_rate);
-        let (right_peak, right_rms) = FftProcessor::calculate_levels(right_slice);
+        let (right_peak, right_rms, _right_true_peak) = FftProcessor::calculate_levels(right_slice);
 
         // Create and send packet
         let timestamp_ms = self.start_time.elapsed().as_millis() as u64;
