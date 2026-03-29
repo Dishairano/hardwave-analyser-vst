@@ -36,7 +36,7 @@ impl Default for HardwaveAnalyserParams {
             .with_string_to_value(Arc::new(|string: &str| string.parse().ok())),
             refresh_rate: IntParam::new(
                 "Refresh Rate",
-                60,
+                144,
                 IntRange::Linear { min: 60, max: 144 },
             )
             .with_unit(" Hz")
