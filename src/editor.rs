@@ -272,16 +272,6 @@ impl HardwaveAnalyserEditor {
                 // Run the WebView2 reg check once so WEBVIEW2_ENSURED is already
                 // set by the time spawn() is called — avoids ~5 s reg.exe delay.
                 ensure_webview2();
-
-                // Clean up legacy data directories from older versions.
-                let base_dir = dirs::data_local_dir()
-                    .unwrap_or_else(std::env::temp_dir)
-                    .join("Hardwave");
-                // Remove old "WebView2/s<timestamp>" and "WebView2/slot_a|b" dirs
-                let legacy_dir = base_dir.join("WebView2");
-                if legacy_dir.exists() {
-                    let _ = std::fs::remove_dir_all(&legacy_dir);
-                }
             });
         }
 
@@ -470,9 +460,9 @@ impl Editor for HardwaveAnalyserEditor {
             // instances because each slot spawns an independent browser process
             // and the old one's controller may still be attached to the parent
             // HWND when the new one is created.
-            let data_dir = dirs::data_local_dir()
+            let data_dir = dirs::data_dir()
                 .unwrap_or_else(std::env::temp_dir)
-                .join("Hardwave")
+                .join("hardwave")
                 .join("analyser-webview2");
             let _ = std::fs::create_dir_all(&data_dir);
             debug_log(&format!("Using WebView2 data dir: {:?}", data_dir));
