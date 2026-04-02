@@ -520,7 +520,12 @@ impl Editor for HardwaveAnalyserEditor {
                 }};
                 window.__HARDWAVE_DEBUG_LOG = "";
 
-                // Polling loop moved to page JS — port passed via URL param.
+                // Block right-click, save, print, view-source, devtools
+                document.addEventListener('contextmenu', function(e) {{ e.preventDefault(); }});
+                document.addEventListener('keydown', function(e) {{
+                    if ((e.ctrlKey || e.metaKey) && 'spu'.indexOf(e.key.toLowerCase()) !== -1) e.preventDefault();
+                    if (e.key === 'F12') e.preventDefault();
+                }});
                 "#,
                 globals_script = globals_script,
                 version = env!("CARGO_PKG_VERSION"),
@@ -718,6 +723,13 @@ impl Editor for HardwaveAnalyserEditor {
                             }}
                         }};
                         window.__HARDWAVE_DEBUG_LOG = "";
+
+                        // Block right-click, save, print, view-source, devtools
+                        document.addEventListener('contextmenu', function(e) {{ e.preventDefault(); }});
+                        document.addEventListener('keydown', function(e) {{
+                            if ((e.ctrlKey || e.metaKey) && 'spu'.indexOf(e.key.toLowerCase()) !== -1) e.preventDefault();
+                            if (e.key === 'F12') e.preventDefault();
+                        }});
                         "#,
                         globals_script = globals_script,
                         version = env!("CARGO_PKG_VERSION"),
