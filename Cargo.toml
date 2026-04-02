@@ -13,7 +13,7 @@ description = "VST3/CLAP plugin that streams audio to Hardwave Suite for real-ti
 crate-type = ["cdylib"]
 
 [dependencies]
-nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git" }
+nih_plug = { git = "https://github.com/Dishairano/nih-plug-hardwave.git", branch = "main" }
 
 # Webview editor (replaces vizia)
 wry = { version = "0.46", optional = true }

@@ -25,12 +25,22 @@ use params::HardwaveAnalyserParams;
 use protocol::AudioPacket;
 use websocket::WebSocketClient;
 
-/// Path to the crash log file.
-fn crash_log_path() -> std::path::PathBuf {
+/// Hardwave data directory (shared between plugin and Suite).
+fn hardwave_data_dir() -> std::path::PathBuf {
     dirs::data_dir()
         .unwrap_or_else(std::env::temp_dir)
         .join("hardwave")
-        .join("analyser-crash.log")
+}
+
+/// Path to the crash log file.
+fn crash_log_path() -> std::path::PathBuf {
+    hardwave_data_dir().join("analyser-crash.log")
+}
+
+/// Sentinel file: existence = "there's an unsent crash report".
+/// The Suite deletes it after the user accepts/dismisses the upload prompt.
+fn crash_pending_path() -> std::path::PathBuf {
+    hardwave_data_dir().join("analyser-crash-pending")
 }
 
 /// Install a panic hook that writes crash details to a persistent log file.
@@ -79,6 +89,13 @@ fn install_crash_handler() {
                 let _ = writeln!(f, "========================================");
                 let _ = writeln!(f);
             }
+            // Write sentinel so the Suite knows there's a crash to report.
+            let pending = crash_pending_path();
+            if let Some(parent) = pending.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let crash_ts = chrono_timestamp();
+            let _ = std::fs::write(&pending, format!("analyser\n{}\n{}", env!("CARGO_PKG_VERSION"), crash_ts));
             // Call the previous hook so nih-plug / DAW logging still works
             prev(info);
         }));
@@ -327,7 +344,7 @@ impl Plugin for HardwaveAnalyser {
         if self.samples_since_send >= self.samples_per_send && self.buffer_left.len() >= FFT_SIZE {
             // Catch panics so a crash in FFT/WS code doesn't take down the DAW.
             // The panic hook still writes the crash log before we get here.
-            let mut wrapper = std::panic::AssertUnwindSafe(|| self.send_fft_data());
+            let wrapper = std::panic::AssertUnwindSafe(|| self.send_fft_data());
             if std::panic::catch_unwind(move || wrapper()).is_err() {
                 Self::debug_log("PANIC caught in send_fft_data — see crash log");
             }

@@ -153,6 +153,10 @@ pub(crate) fn ensure_webview2() {
 /// Default editor size.
 const EDITOR_WIDTH: u32 = 1100;
 const EDITOR_HEIGHT: u32 = 700;
+const MIN_WIDTH: u32 = 800;
+const MIN_HEIGHT: u32 = 500;
+const MAX_WIDTH: u32 = 2560;
+const MAX_HEIGHT: u32 = 1600;
 
 /// Base URL for the analyser page.
 /// Points directly at the analyser subdomain to skip the 307 redirect from
@@ -246,11 +250,14 @@ unsafe impl Send for SendWebView {}
 pub struct HardwaveAnalyserEditor {
     packet_slot: Arc<Mutex<Option<AudioPacket>>>,
     auth_token: Arc<Mutex<Option<String>>>,
-    size: (u32, u32),
     /// Current display scale factor (stored as f32 bits for atomic access).
     scale: Arc<AtomicU32>,
     /// Milliseconds between FFT deliveries — kept in sync with the refresh_rate param.
     refresh_interval_ms: Arc<AtomicU32>,
+    /// Current editor size (updated by host or JS resize IPC).
+    editor_size: Arc<Mutex<(u32, u32)>>,
+    /// Channel to tell the webview thread to resize.
+    resize_tx: Arc<Mutex<Option<crossbeam_channel::Sender<(u32, u32)>>>>,
 }
 
 impl HardwaveAnalyserEditor {
@@ -288,9 +295,10 @@ impl HardwaveAnalyserEditor {
         Self {
             packet_slot,
             auth_token: Arc::new(Mutex::new(token)),
-            size: (EDITOR_WIDTH, EDITOR_HEIGHT),
             scale: Arc::new(AtomicU32::new(1.0f32.to_bits())),
             refresh_interval_ms,
+            editor_size: Arc::new(Mutex::new((EDITOR_WIDTH, EDITOR_HEIGHT))),
+            resize_tx: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -424,12 +432,18 @@ impl Editor for HardwaveAnalyserEditor {
     fn spawn(
         &self,
         parent: ParentWindowHandle,
-        _context: Arc<dyn GuiContext>,
+        context: Arc<dyn GuiContext>,
     ) -> Box<dyn std::any::Any + Send> {
         let packet_slot = Arc::clone(&self.packet_slot);
         let running = Arc::new(AtomicBool::new(true));
         let auth_token = Arc::clone(&self.auth_token);
         let globals_script = self.globals_init_script();
+
+        // Resize channel: IPC/host → webview thread
+        let (resize_tx_val, resize_rx) = crossbeam_channel::unbounded::<(u32, u32)>();
+        *self.resize_tx.lock() = Some(resize_tx_val);
+        let editor_size = Arc::clone(&self.editor_size);
+        let resize_tx = Arc::clone(&self.resize_tx);
 
         // ---------------------------------------------------------------
         // Windows: create webview on the DAW's UI thread using build()
@@ -513,6 +527,9 @@ impl Editor for HardwaveAnalyserEditor {
                     }},
                     clearToken: function() {{
                         window.ipc.postMessage('clearToken');
+                    }},
+                    resize: function(w, h) {{
+                        window.ipc.postMessage('resize:' + w + ',' + h);
                     }}
                 }};
                 window.__HARDWAVE_DEBUG_LOG = "";
@@ -545,19 +562,39 @@ impl Editor for HardwaveAnalyserEditor {
                     url.starts_with("https://analyser.hardwavestudios.com/") ||
                     url.starts_with("http://127.0.0.1:")
                 })
-                .with_ipc_handler(move |req: wry::http::Request<String>| {
-                    let msg = req.body().as_str();
-                    if let Some(token) = msg.strip_prefix("saveToken:") {
-                        let token = token.trim().to_string();
-                        auth::save_token(&token);
-                        *ipc_auth_token.lock() = Some(token);
-                    } else if let Some(signed) = msg.strip_prefix("saveSubCache:") {
-                        auth::save_sub_cache(signed.trim());
-                    } else if msg == "clearToken" {
-                        auth::clear_token();
-                        *ipc_auth_token.lock() = None;
-                    } else if let Some(info) = msg.strip_prefix("debug:") {
-                        debug_log(&format!("[js] {}", info));
+                .with_ipc_handler({
+                    let ipc_editor_size = Arc::clone(&editor_size);
+                    let ipc_resize_tx = Arc::clone(&resize_tx);
+                    let ipc_context = Arc::clone(&context);
+                    move |req: wry::http::Request<String>| {
+                        let msg = req.body().as_str();
+                        if let Some(token) = msg.strip_prefix("saveToken:") {
+                            let token = token.trim().to_string();
+                            auth::save_token(&token);
+                            *ipc_auth_token.lock() = Some(token);
+                        } else if let Some(signed) = msg.strip_prefix("saveSubCache:") {
+                            auth::save_sub_cache(signed.trim());
+                        } else if msg == "clearToken" {
+                            auth::clear_token();
+                            *ipc_auth_token.lock() = None;
+                        } else if let Some(info) = msg.strip_prefix("debug:") {
+                            debug_log(&format!("[js] {}", info));
+                        } else if let Some(json) = msg.strip_prefix("resize:") {
+                            // JS sends "resize:{w},{h}"
+                            let parts: Vec<&str> = json.split(',').collect();
+                            if parts.len() == 2 {
+                                if let (Ok(w), Ok(h)) = (parts[0].parse::<u32>(), parts[1].parse::<u32>()) {
+                                    let w = w.clamp(MIN_WIDTH, MAX_WIDTH);
+                                    let h = h.clamp(MIN_HEIGHT, MAX_HEIGHT);
+                                    *ipc_editor_size.lock() = (w, h);
+                                    if ipc_context.request_resize() {
+                                        if let Some(tx) = ipc_resize_tx.lock().as_ref() {
+                                            let _ = tx.send((w, h));
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 })
                 .with_initialization_script(&init_script)
@@ -620,6 +657,9 @@ impl Editor for HardwaveAnalyserEditor {
                 let parent_wrapper = RwhWrapper(reconstructed);
 
                 let ipc_auth_token = Arc::clone(&auth_token);
+                let ipc_editor_size = Arc::clone(&editor_size);
+                let ipc_resize_tx = Arc::clone(&resize_tx);
+                let ipc_context = Arc::clone(&context);
                 let webview = wry::WebViewBuilder::new()
                     .with_bounds(wry::Rect {
                         position: wry::dpi::LogicalPosition::new(0, 0).into(),
@@ -649,6 +689,20 @@ impl Editor for HardwaveAnalyserEditor {
                         } else if msg == "clearToken" {
                             auth::clear_token();
                             *ipc_auth_token.lock() = None;
+                        } else if let Some(json) = msg.strip_prefix("resize:") {
+                            let parts: Vec<&str> = json.split(',').collect();
+                            if parts.len() == 2 {
+                                if let (Ok(w), Ok(h)) = (parts[0].parse::<u32>(), parts[1].parse::<u32>()) {
+                                    let w = w.clamp(MIN_WIDTH, MAX_WIDTH);
+                                    let h = h.clamp(MIN_HEIGHT, MAX_HEIGHT);
+                                    *ipc_editor_size.lock() = (w, h);
+                                    if ipc_context.request_resize() {
+                                        if let Some(tx) = ipc_resize_tx.lock().as_ref() {
+                                            let _ = tx.send((w, h));
+                                        }
+                                    }
+                                }
+                            }
                         }
                     })
                     .with_initialization_script(&format!(
@@ -672,6 +726,9 @@ impl Editor for HardwaveAnalyserEditor {
                             }},
                             clearToken: function() {{
                                 window.ipc.postMessage('clearToken');
+                            }},
+                            resize: function(w, h) {{
+                                window.ipc.postMessage('resize:' + w + ',' + h);
                             }}
                         }};
                         window.__HARDWAVE_DEBUG_LOG = "";
@@ -686,15 +743,24 @@ impl Editor for HardwaveAnalyserEditor {
                     Ok(webview) => {
                         let mut last_scale_bits = initial_scale.to_bits();
                         while running_clone.load(Ordering::Relaxed) {
+                            // Apply pending resize from JS IPC or host.
+                            while let Ok((w, h)) = resize_rx.try_recv() {
+                                let _ = webview.set_bounds(wry::Rect {
+                                    position: wry::dpi::LogicalPosition::new(0, 0).into(),
+                                    size: wry::dpi::LogicalSize::new(w, h).into(),
+                                });
+                            }
+
                             // Resize webview if the DAW reported a new scale factor.
                             let current_scale_bits = scale_clone.load(Ordering::Relaxed);
                             if current_scale_bits != last_scale_bits {
                                 let scale = f32::from_bits(current_scale_bits);
+                                let (ew, eh) = *editor_size.lock();
                                 let _ = webview.set_bounds(wry::Rect {
                                     position: wry::dpi::LogicalPosition::new(0, 0).into(),
                                     size: wry::dpi::LogicalSize::new(
-                                        (EDITOR_WIDTH as f32 * scale) as u32,
-                                        (EDITOR_HEIGHT as f32 * scale) as u32,
+                                        (ew as f32 * scale) as u32,
+                                        (eh as f32 * scale) as u32,
                                     ).into(),
                                 });
                                 last_scale_bits = current_scale_bits;
@@ -736,16 +802,23 @@ impl Editor for HardwaveAnalyserEditor {
     }
 
     fn size(&self) -> (u32, u32) {
+        let (w, h) = *self.editor_size.lock();
         let scale = f32::from_bits(self.scale.load(Ordering::Relaxed));
-        (
-            (self.size.0 as f32 * scale) as u32,
-            (self.size.1 as f32 * scale) as u32,
-        )
+        ((w as f32 * scale) as u32, (h as f32 * scale) as u32)
     }
 
     fn set_scale_factor(&self, factor: f32) -> bool {
         self.scale.store(factor.to_bits(), Ordering::Relaxed);
         true
+    }
+
+    fn set_size(&self, width: u32, height: u32) {
+        let w = width.clamp(MIN_WIDTH, MAX_WIDTH);
+        let h = height.clamp(MIN_HEIGHT, MAX_HEIGHT);
+        *self.editor_size.lock() = (w, h);
+        if let Some(tx) = self.resize_tx.lock().as_ref() {
+            let _ = tx.send((w, h));
+        }
     }
 
     fn param_value_changed(&self, _id: &str, _normalized_value: f32) {}
