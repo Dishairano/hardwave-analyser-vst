@@ -273,21 +273,14 @@ impl HardwaveAnalyserEditor {
                 // set by the time spawn() is called — avoids ~5 s reg.exe delay.
                 ensure_webview2();
 
-                // Clean up legacy session directories (s<timestamp>) from older versions.
-                // v0.9.2+ uses fixed slot_a/slot_b dirs instead.
+                // Clean up legacy data directories from older versions.
                 let base_dir = dirs::data_local_dir()
                     .unwrap_or_else(std::env::temp_dir)
-                    .join("Hardwave")
-                    .join("WebView2");
-                if let Ok(entries) = std::fs::read_dir(&base_dir) {
-                    for entry in entries.flatten() {
-                        let name = entry.file_name();
-                        let name = name.to_string_lossy();
-                        // Only delete old "s<timestamp>" dirs, leave slot_a/slot_b alone
-                        if name.starts_with('s') && name[1..].chars().all(|c| c.is_ascii_digit()) {
-                            let _ = std::fs::remove_dir_all(entry.path());
-                        }
-                    }
+                    .join("Hardwave");
+                // Remove old "WebView2/s<timestamp>" and "WebView2/slot_a|b" dirs
+                let legacy_dir = base_dir.join("WebView2");
+                if legacy_dir.exists() {
+                    let _ = std::fs::remove_dir_all(&legacy_dir);
                 }
             });
         }
@@ -472,24 +465,17 @@ impl Editor for HardwaveAnalyserEditor {
             ensure_webview2();
             sw.mark("ensure_webview2()");
 
-            // Ping-pong between two fixed data directories (slot_a / slot_b).
-            // This gives us BOTH fast cached loads AND avoids the 5-6 s lock
-            // stall on rapid close-reopen:
-            //   Open 1 → slot_a (cold on first ever use, warm after that)
-            //   Open 2 → slot_b (slot_a lock releasing in background)
-            //   Open 3 → slot_a (warm — lock released during slot_b session)
-            // After the first two opens, every subsequent open hits warm cache.
-            static DATA_DIR_SLOT: std::sync::atomic::AtomicU8 =
-                std::sync::atomic::AtomicU8::new(0);
-            let slot = DATA_DIR_SLOT.fetch_xor(1, Ordering::Relaxed);
-
-            let base_dir = dirs::data_local_dir()
+            // Single fixed data directory — same as LoudLab.
+            // Using separate slot_a/slot_b dirs caused overlapping WebView2
+            // instances because each slot spawns an independent browser process
+            // and the old one's controller may still be attached to the parent
+            // HWND when the new one is created.
+            let data_dir = dirs::data_local_dir()
                 .unwrap_or_else(std::env::temp_dir)
                 .join("Hardwave")
-                .join("WebView2");
-            let data_dir = base_dir.join(if slot == 0 { "slot_a" } else { "slot_b" });
+                .join("analyser-webview2");
             let _ = std::fs::create_dir_all(&data_dir);
-            debug_log(&format!("Using WebView2 data dir: {:?} (slot {})", data_dir, slot));
+            debug_log(&format!("Using WebView2 data dir: {:?}", data_dir));
             sw.mark("data dir ready");
 
             let mut web_context = wry::WebContext::new(Some(data_dir));
