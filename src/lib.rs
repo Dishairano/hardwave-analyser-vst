@@ -25,6 +25,77 @@ use params::HardwaveAnalyserParams;
 use protocol::AudioPacket;
 use websocket::WebSocketClient;
 
+/// Path to the crash log file.
+fn crash_log_path() -> std::path::PathBuf {
+    dirs::data_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("hardwave")
+        .join("analyser-crash.log")
+}
+
+/// Install a panic hook that writes crash details to a persistent log file.
+/// Called once per process; subsequent calls are no-ops.
+fn install_crash_handler() {
+    use std::sync::Once;
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            use std::io::Write;
+            let path = crash_log_path();
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+            {
+                let ts = chrono_timestamp();
+                let payload = if let Some(s) = info.payload().downcast_ref::<&str>() {
+                    (*s).to_string()
+                } else if let Some(s) = info.payload().downcast_ref::<String>() {
+                    s.clone()
+                } else {
+                    "unknown panic".to_string()
+                };
+                let location = info
+                    .location()
+                    .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+                    .unwrap_or_else(|| "unknown location".to_string());
+                let bt = std::backtrace::Backtrace::force_capture();
+
+                let _ = writeln!(f, "========================================");
+                let _ = writeln!(f, "HARDWAVE ANALYSER CRASH REPORT");
+                let _ = writeln!(f, "Time:     {}", ts);
+                let _ = writeln!(f, "Version:  {}", env!("CARGO_PKG_VERSION"));
+                let _ = writeln!(f, "OS:       {}", std::env::consts::OS);
+                let _ = writeln!(f, "Arch:     {}", std::env::consts::ARCH);
+                let _ = writeln!(f, "Location: {}", location);
+                let _ = writeln!(f, "Message:  {}", payload);
+                let _ = writeln!(f, "");
+                let _ = writeln!(f, "Backtrace:");
+                let _ = writeln!(f, "{}", bt);
+                let _ = writeln!(f, "========================================");
+                let _ = writeln!(f);
+            }
+            // Call the previous hook so nih-plug / DAW logging still works
+            prev(info);
+        }));
+    });
+}
+
+/// Simple UTC timestamp without pulling in chrono.
+fn chrono_timestamp() -> String {
+    let dur = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = dur.as_secs();
+    // Format as seconds-since-epoch (readable via any converter)
+    // plus a human-approx: days since 2025-01-01
+    format!("{} (unix)", secs)
+}
+
 /// Main plugin struct
 pub struct HardwaveAnalyser {
     params: Arc<HardwaveAnalyserParams>,
@@ -76,6 +147,8 @@ pub struct HardwaveAnalyser {
 
 impl Default for HardwaveAnalyser {
     fn default() -> Self {
+        install_crash_handler();
+
         let packet_slot: Arc<Mutex<Option<AudioPacket>>> = Arc::new(Mutex::new(None));
 
         #[cfg(feature = "gui")]
@@ -161,6 +234,13 @@ impl Plugin for HardwaveAnalyser {
         buffer_config: &BufferConfig,
         _context: &mut impl InitContext<Self>,
     ) -> bool {
+        Self::debug_log(&format!(
+            "Hardwave Analyser v{} initialized (sr={}, crash log: {:?})",
+            env!("CARGO_PKG_VERSION"),
+            buffer_config.sample_rate,
+            crash_log_path(),
+        ));
+
         self.sample_rate = buffer_config.sample_rate;
         let refresh_rate = self.params.refresh_rate.value() as f32;
         self.samples_per_send = (self.sample_rate / refresh_rate) as usize;
@@ -245,7 +325,12 @@ impl Plugin for HardwaveAnalyser {
 
         // Send FFT data at ~20Hz
         if self.samples_since_send >= self.samples_per_send && self.buffer_left.len() >= FFT_SIZE {
-            self.send_fft_data();
+            // Catch panics so a crash in FFT/WS code doesn't take down the DAW.
+            // The panic hook still writes the crash log before we get here.
+            let mut wrapper = std::panic::AssertUnwindSafe(|| self.send_fft_data());
+            if std::panic::catch_unwind(move || wrapper()).is_err() {
+                Self::debug_log("PANIC caught in send_fft_data — see crash log");
+            }
             self.samples_since_send = 0;
         }
 
