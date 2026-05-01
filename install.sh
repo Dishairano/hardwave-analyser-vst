@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 #
-# Hardwave Bridge VST Installer
+# Hardwave Analyser VST Installer
 # Builds and installs the VST3/CLAP plugin to the appropriate system location
 #
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PLUGIN_NAME="Hardwave Bridge"
+PLUGIN_NAME="Hardwave Analyser"
 
 # Colors for output
 RED='\033[0;31m'
@@ -19,8 +19,8 @@ NC='\033[0m' # No Color
 print_header() {
     echo -e "${CYAN}"
     echo "╔═══════════════════════════════════════════════════════════╗"
-    echo "║           Hardwave Bridge VST/CLAP Installer              ║"
-    echo "║         Stream audio from your DAW to Hardwave Suite      ║"
+    echo "║           Hardwave Analyser VST/CLAP Installer              ║"
+    echo "║         Real-time spectrum analysis right inside your DAW      ║"
     echo "╚═══════════════════════════════════════════════════════════╝"
     echo -e "${NC}"
 }
@@ -94,7 +94,7 @@ build_plugin() {
 
     # Check if xtask exists, if not use cargo build
     if [ -f "xtask/src/main.rs" ] || cargo xtask --help &> /dev/null 2>&1; then
-        cargo xtask bundle hardwave-bridge --release
+        cargo xtask bundle hardwave-analyser --release
     else
         # Fallback: just build and manually create bundle structure
         cargo build --release
@@ -105,14 +105,14 @@ build_plugin() {
 
         case "$(detect_os)" in
             linux)
-                mkdir -p "$target_dir/Hardwave Bridge.vst3/Contents/x86_64-linux"
-                cp "$SCRIPT_DIR/target/release/libhardwave_bridge.so" \
-                   "$target_dir/Hardwave Bridge.vst3/Contents/x86_64-linux/Hardwave Bridge.so" 2>/dev/null || true
+                mkdir -p "$target_dir/Hardwave Analyser.vst3/Contents/x86_64-linux"
+                cp "$SCRIPT_DIR/target/release/libhardwave_analyser.so" \
+                   "$target_dir/Hardwave Analyser.vst3/Contents/x86_64-linux/Hardwave Analyser.so" 2>/dev/null || true
                 ;;
             macos)
-                mkdir -p "$target_dir/Hardwave Bridge.vst3/Contents/MacOS"
-                cp "$SCRIPT_DIR/target/release/libhardwave_bridge.dylib" \
-                   "$target_dir/Hardwave Bridge.vst3/Contents/MacOS/Hardwave Bridge" 2>/dev/null || true
+                mkdir -p "$target_dir/Hardwave Analyser.vst3/Contents/MacOS"
+                cp "$SCRIPT_DIR/target/release/libhardwave_analyser.dylib" \
+                   "$target_dir/Hardwave Analyser.vst3/Contents/MacOS/Hardwave Analyser" 2>/dev/null || true
                 ;;
         esac
     fi
@@ -136,9 +136,9 @@ install_plugin() {
     local vst3_bundle=$(find "$SCRIPT_DIR/target" -name "*.vst3" -type d 2>/dev/null | head -1)
     if [ -n "$vst3_bundle" ] && [ -d "$vst3_bundle" ]; then
         print_step "Installing VST3 to $vst3_path"
-        rm -rf "$vst3_path/Hardwave Bridge.vst3"
+        rm -rf "$vst3_path/Hardwave Analyser.vst3"
         cp -r "$vst3_bundle" "$vst3_path/"
-        print_success "VST3 installed: $vst3_path/Hardwave Bridge.vst3"
+        print_success "VST3 installed: $vst3_path/Hardwave Analyser.vst3"
     else
         print_error "VST3 bundle not found"
     fi
@@ -180,10 +180,10 @@ main() {
     echo "Next steps:"
     echo "  1. Open your DAW (Ableton, FL Studio, Logic, Reaper, etc.)"
     echo "  2. Rescan for plugins if needed"
-    echo "  3. Add 'Hardwave Bridge' to your master channel"
-    echo "  4. Open Hardwave Suite and switch to VST mode"
+    echo "  3. Add 'Hardwave Analyser' to any track or master"
+    echo "  4. Sign in with your Hardwave Studios account (free)"
     echo ""
-    echo "The plugin will automatically connect to Hardwave Suite on port 9847."
+    echo "The plugin loads its UI directly — no Suite required."
 }
 
 # Handle command line args
@@ -211,9 +211,9 @@ case "${1:-}" in
         clap_path="$(get_clap_path "$os")"
 
         print_step "Uninstalling plugins..."
-        rm -rf "$vst3_path/Hardwave Bridge.vst3"
-        rm -f "$clap_path/Hardwave Bridge.clap"
-        rm -f "$clap_path/hardwave_bridge.clap"
+        rm -rf "$vst3_path/Hardwave Analyser.vst3"
+        rm -f "$clap_path/Hardwave Analyser.clap"
+        rm -f "$clap_path/hardwave_analyser.clap"
         print_success "Plugins uninstalled"
         exit 0
         ;;

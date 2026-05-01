@@ -1,6 +1,6 @@
-# Hardwave Bridge
+# Hardwave Analyser
 
-VST3/CLAP plugin that streams audio from your DAW to [Hardwave Suite](https://hardwave.studio) for real-time spectrum analysis, phase correlation, and level metering.
+VST3/CLAP plugin that streams real-time audio analysis to its embedded webview UI — spectrum, spectrogram, phase correlation, LUFS metering, kick analysis, and more. Free, with optional integration into the [Hardwave Suite](https://hardwave.studio) desktop app.
 
 ## Download
 
@@ -8,10 +8,10 @@ Get the latest release from the [Releases page](../../releases).
 
 | Platform | Download |
 |----------|----------|
-| Windows x64 | [hardwave-bridge-windows-x64.zip](../../releases/latest/download/hardwave-bridge-windows-x64.zip) |
-| macOS Intel | [hardwave-bridge-macos-x64.zip](../../releases/latest/download/hardwave-bridge-macos-x64.zip) |
-| macOS Apple Silicon | [hardwave-bridge-macos-arm64.zip](../../releases/latest/download/hardwave-bridge-macos-arm64.zip) |
-| Linux x64 | [hardwave-bridge-linux-x64.zip](../../releases/latest/download/hardwave-bridge-linux-x64.zip) |
+| Windows x64 | [hardwave-analyser-windows-x64.zip](../../releases/latest/download/hardwave-analyser-windows-x64.zip) |
+| macOS Intel | [hardwave-analyser-macos-x64.zip](../../releases/latest/download/hardwave-analyser-macos-x64.zip) |
+| macOS Apple Silicon | [hardwave-analyser-macos-arm64.zip](../../releases/latest/download/hardwave-analyser-macos-arm64.zip) |
+| Linux x64 | [hardwave-analyser-linux-x64.zip](../../releases/latest/download/hardwave-analyser-linux-x64.zip) |
 
 ## Installation
 
@@ -29,20 +29,25 @@ Get the latest release from the [Releases page](../../releases).
 
 ## Usage
 
-1. Open **Hardwave Suite** desktop app
-2. Go to **Analyser** and select **VST** as the audio source
-3. In your DAW, add **Hardwave Bridge** to your master channel
-4. The connection happens automatically on port 9847
+1. In your DAW, add **Hardwave Analyser** to any track or master channel
+2. Open the plugin window — the analyser UI loads automatically
+3. Sign in with your Hardwave Studios account (free)
 
-The plugin passes audio through unchanged - it only analyzes and streams the data.
+The plugin passes audio through unchanged — it only analyzes and visualizes.
 
 ## Features
 
-- **Zero latency** - Pure pass-through, no processing delay
-- **64-band spectrum** - Logarithmic frequency analysis (20Hz - 20kHz)
-- **Stereo metering** - Peak, RMS, and phase correlation
-- **Auto-reconnect** - Automatically reconnects if Hardwave Suite restarts
-- **Low overhead** - ~20Hz update rate, ~500 bytes per packet
+- **Zero-latency pass-through** — no processing delay
+- **256-band log spectrum** with peak hold, freeze, slope, and 5 themes
+- **Spectrogram view** with perceptual color mapping
+- **K-weighted LUFS** — Momentary, Short-term, Integrated, plus LRA
+- **True-peak metering** with 4× oversampling
+- **Phase correlation** + **Lissajous vectorscope**
+- **Oscilloscope** with zero-crossing trigger
+- **Kick analysis** — fundamental frequency, musical note, and Sub/Punch/Tail energy ratios (powers the KickForge workflow)
+- **Beginner & Advanced UI modes** with first-run setup
+- **Presets** — save, load, set default
+- **Export** — PNG snapshots and CSV spectrum data
 
 ## Building from Source
 
@@ -51,9 +56,9 @@ The plugin passes audio through unchanged - it only analyzes and streams the dat
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 # Clone and build
-git clone https://github.com/hardwave-studios/hardwave-bridge.git
-cd hardwave-bridge
-cargo xtask bundle hardwave-bridge --release
+git clone https://github.com/Dishairano/hardwave-analyser-vst.git
+cd hardwave-analyser-vst
+cargo xtask bundle hardwave-analyser --release
 
 # Plugins are in target/bundled/
 ```
@@ -66,11 +71,12 @@ Or use the installer script:
 ## Technical Details
 
 - **Framework:** [nih-plug](https://github.com/robbert-vdh/nih-plug)
-- **Protocol:** Binary WebSocket on port 9847
-- **FFT Size:** 4096 samples
-- **Update Rate:** ~20Hz
-- **Packet Size:** ~536 bytes
+- **UI runtime:** [wry](https://github.com/tauri-apps/wry) WebView (loads `analyser.hardwavestudios.com/vst/analyser`)
+- **FFT:** 8192-point with Welch's method (multi-segment overlapping) and configurable window (Hann / Blackman-Harris / Kaiser)
+- **Display bands:** 256 logarithmic bands (5 Hz – 20 kHz)
+- **Update rate:** 60–144 Hz (configurable)
+- **Audio packet:** 4096 raw FFT bins + 512-sample waveform per channel + scalars
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) for details.
+MIT License — see [LICENSE](LICENSE) for details.

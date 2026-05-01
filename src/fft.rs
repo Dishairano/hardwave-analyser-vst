@@ -14,7 +14,10 @@ use crate::protocol::NUM_BINS;
 pub const FFT_SIZE: usize = NUM_BINS * 2;
 
 /// Number of overlapping windows for Welch's method
-const WELCH_SEGMENTS: usize = 4;
+pub const WELCH_SEGMENTS: usize = 4;
+/// Minimum sample count for full multi-segment Welch's coverage.
+/// `process` degrades to a single segment when fewer samples are buffered.
+pub const WELCH_MIN_SAMPLES: usize = FFT_SIZE + (WELCH_SEGMENTS - 1) * (FFT_SIZE / 2);
 
 /// Window function types
 #[derive(Clone, Copy, PartialEq)]

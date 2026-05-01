@@ -3,11 +3,11 @@ members = ["xtask"]
 
 [package]
 name = "hardwave-analyser"
-version = "0.10.3"
+version = "0.11.0"
 edition = "2021"
 authors = ["Hardwave Studios"]
 license = "MIT"
-description = "VST3/CLAP plugin that streams audio to Hardwave Suite for real-time analysis"
+description = "VST3/CLAP spectrum analyser plugin with embedded webview UI"
 
 [lib]
 crate-type = ["cdylib"]

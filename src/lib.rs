@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-use fft::{FftProcessor, FFT_SIZE};
+use fft::{FftProcessor, FFT_SIZE, WELCH_MIN_SAMPLES};
 use params::HardwaveAnalyserParams;
 use protocol::AudioPacket;
 use websocket::WebSocketClient;
@@ -184,8 +184,8 @@ impl Default for HardwaveAnalyser {
             },
             fft_left: FftProcessor::new(),
             fft_right: FftProcessor::new(),
-            buffer_left: VecDeque::with_capacity(FFT_SIZE),
-            buffer_right: VecDeque::with_capacity(FFT_SIZE),
+            buffer_left: VecDeque::with_capacity(WELCH_MIN_SAMPLES),
+            buffer_right: VecDeque::with_capacity(WELCH_MIN_SAMPLES),
             sample_rate: 48000.0,
             samples_since_send: 0,
             samples_per_send: 800, // 48000 / 60 = 800 samples for 60Hz default
@@ -330,9 +330,10 @@ impl Plugin for HardwaveAnalyser {
             self.buffer_left.push_back(left);
             self.buffer_right.push_back(right);
 
-            // Keep buffer at FFT_SIZE * 2 for Welch's method overlap
-            let max_buf = FFT_SIZE * 2;
-            if self.buffer_left.len() > max_buf {
+            // Keep buffer sized for full Welch's-method coverage.
+            // (FFT_SIZE + (WELCH_SEGMENTS-1) * FFT_SIZE/2 = 20480 samples at 8192 FFT)
+            // The previous cap of FFT_SIZE * 2 silently degraded to single-segment Welch.
+            if self.buffer_left.len() > WELCH_MIN_SAMPLES {
                 self.buffer_left.pop_front();
                 self.buffer_right.pop_front();
             }
