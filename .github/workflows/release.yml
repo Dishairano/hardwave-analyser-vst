@@ -145,14 +145,13 @@ jobs:
             echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
           fi
 
-      - name: Create Release
+      - name: Create Release (as pre-release — admin publishes via /dashboard/admin/releases)
         uses: softprops/action-gh-release@v1
         with:
           tag_name: ${{ steps.version.outputs.version }}
           name: Hardwave Analyser ${{ steps.version.outputs.version }}
           draft: false
-          prerelease: false
-          make_latest: true
+          prerelease: true
           generate_release_notes: true
           files: |
             artifacts/hardwave-analyser-linux-x64/*.tar.gz
@@ -192,17 +191,23 @@ jobs:
             ### Usage
 
             1. Add **Hardwave Analyser** to any channel in your DAW
-            2. The plugin opens an embedded spectrum analyser (requires Hardwave Pro subscription)
+            2. The plugin opens an embedded spectrum analyser (free for everyone — sign in once with your free account)
             3. Log in once — credentials are saved locally
 
-      - name: Sync version to website DB
+      # sync-version + product DB updates are gated to STABLE tags only.
+      # Pre-release tags (-alpha/-beta/-rc) build binaries and create the GH pre-release,
+      # but the website's products.current_version + download URLs only flip when the admin
+      # promotes the release to public via /dashboard/admin/releases.
+      - name: Sync version to website DB (stable tags only)
+        if: ${{ !contains(steps.version.outputs.version, '-') }}
         run: |
           curl -sf -X POST https://hardwavestudios.com/api/internal/sync-version \
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer ${{ secrets.INTERNAL_API_SECRET }}" \
             -d "{\"slug\":\"analyser\",\"version\":\"${{ steps.version.outputs.version }}\"}"
 
-      - name: Update product database
+      - name: Update product database (stable tags only)
+        if: ${{ !contains(steps.version.outputs.version, '-') }}
         env:
           DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
         run: |
