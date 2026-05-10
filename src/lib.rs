@@ -123,9 +123,9 @@ pub struct HardwaveAnalyser {
     /// Shared slot for the latest FFT packet (written by audio thread, read by editor)
     packet_slot: Arc<Mutex<Option<AudioPacket>>>,
 
-    /// Editor instance (created once, reused)
-    #[cfg(feature = "gui")]
-    editor_instance: Option<editor::HardwaveAnalyserEditor>,
+    // Editor is constructed fresh per `editor()` call — see comment on the
+    // `editor()` impl below for why the previous one-shot Option pattern was
+    // a re-open bug, not an optimisation.
 
     /// FFT processor for left channel
     fft_left: FftProcessor,
@@ -175,13 +175,6 @@ impl Default for HardwaveAnalyser {
             params: Arc::new(HardwaveAnalyserParams::default()),
             ws_client: WebSocketClient::new(),
             packet_slot: Arc::clone(&packet_slot),
-            #[cfg(feature = "gui")]
-            editor_instance: {
-                Some(editor::HardwaveAnalyserEditor::new(
-                    packet_slot,
-                    Arc::clone(&refresh_interval_ms),
-                ))
-            },
             fft_left: FftProcessor::new(),
             fft_right: FftProcessor::new(),
             buffer_left: VecDeque::with_capacity(WELCH_MIN_SAMPLES),
@@ -233,11 +226,17 @@ impl Plugin for HardwaveAnalyser {
     }
 
     fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
+        // Construct a fresh editor on every call — `editor()` is invoked
+        // once per attach, not once per plug-in instance. The previous
+        // `Option::take()` pattern returned `Some` once and `None` forever,
+        // so re-opening the GUI in a session showed nothing. (F9 in the
+        // VST stability audit.)
         #[cfg(feature = "gui")]
         {
-            self.editor_instance
-                .take()
-                .map(|e| Box::new(e) as Box<dyn Editor>)
+            Some(Box::new(editor::HardwaveAnalyserEditor::new(
+                Arc::clone(&self.packet_slot),
+                Arc::clone(&self.refresh_interval_ms),
+            )) as Box<dyn Editor>)
         }
         #[cfg(not(feature = "gui"))]
         {

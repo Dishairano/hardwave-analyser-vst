@@ -258,6 +258,22 @@ pub struct HardwaveAnalyserEditor {
     editor_size: Arc<Mutex<(u32, u32)>>,
     /// Channel to tell the webview thread to resize.
     resize_tx: Arc<Mutex<Option<crossbeam_channel::Sender<(u32, u32)>>>>,
+    /// Process-unique identifier for this plug-in instance. Used to give
+    /// every instance its own WebView2 user-data folder.
+    instance_id: String,
+}
+
+/// Generate an identifier guaranteed unique within this process.
+fn unique_instance_id() -> String {
+    use std::sync::atomic::AtomicUsize;
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let pid = std::process::id();
+    format!("{}-{}-{}", pid, nanos, n)
 }
 
 impl HardwaveAnalyserEditor {
@@ -282,6 +298,7 @@ impl HardwaveAnalyserEditor {
             refresh_interval_ms,
             editor_size: Arc::new(Mutex::new((EDITOR_WIDTH, EDITOR_HEIGHT))),
             resize_tx: Arc::new(Mutex::new(None)),
+            instance_id: unique_instance_id(),
         }
     }
 
@@ -455,15 +472,20 @@ impl Editor for HardwaveAnalyserEditor {
             ensure_webview2();
             sw.mark("ensure_webview2()");
 
-            // Single fixed data directory — same as LoudLab.
-            // Using separate slot_a/slot_b dirs caused overlapping WebView2
-            // instances because each slot spawns an independent browser process
-            // and the old one's controller may still be attached to the parent
-            // HWND when the new one is created.
+            // Per-instance data directory. The earlier slot_a/slot_b approach
+            // failed because slots could overlap; the bare "analyser-webview2"
+            // approach failed because two plug-in instances on different
+            // tracks shared one UserDataFolder and raced inside the WebView2
+            // browser process. Per-instance under analyser-webview2/<id>
+            // ends both failure modes — every instance gets its own browser
+            // child process keyed on a unique folder, and the folder is
+            // stable across editor close/reopen on the SAME instance so we
+            // keep cookies and cache.
             let data_dir = dirs::data_dir()
                 .unwrap_or_else(std::env::temp_dir)
                 .join("hardwave")
-                .join("analyser-webview2");
+                .join("analyser-webview2")
+                .join(&self.instance_id);
             let _ = std::fs::create_dir_all(&data_dir);
             debug_log(&format!("Using WebView2 data dir: {:?}", data_dir));
             sw.mark("data dir ready");
@@ -830,6 +852,13 @@ struct EditorHandle {
 impl Drop for EditorHandle {
     fn drop(&mut self) {
         debug_log("EditorHandle dropped, closing editor");
+        // Signal shutdown then explicitly join the worker thread.
+        // JoinHandle::drop detaches — leaves the thread alive past Drop,
+        // racing with WebView2 teardown and holding the user-data dir lock
+        // for the next instance. Joining bounds Drop deterministically.
         self.running.store(false, Ordering::Relaxed);
+        if let Some(h) = self._thread.take() {
+            let _ = h.join();
+        }
     }
 }
