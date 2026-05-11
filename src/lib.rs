@@ -45,6 +45,8 @@ fn crash_pending_path() -> std::path::PathBuf {
 
 /// Install a panic hook that writes crash details to a persistent log file.
 /// Called once per process; subsequent calls are no-ops.
+mod crash_reporter;
+
 fn install_crash_handler() {
     use std::sync::Once;
     static INIT: Once = Once::new();
@@ -165,6 +167,7 @@ pub struct HardwaveAnalyser {
 impl Default for HardwaveAnalyser {
     fn default() -> Self {
         install_crash_handler();
+        crash_reporter::install("analyser");
 
         let packet_slot: Arc<Mutex<Option<AudioPacket>>> = Arc::new(Mutex::new(None));
 
