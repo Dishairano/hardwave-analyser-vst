@@ -127,6 +127,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -235,3 +237,49 @@ jobs:
 
           echo "Database updated: analyser -> ${VERSION_NUM}"
           rm -f ~/.ssh/deploy_key
+      - name: Post Discord changelog
+        if: ${{ env.DISCORD_WEBHOOK_URL != '' }}
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          VERSION: ${{ steps.version.outputs.version }}
+          PLUGIN_NAME: "Hardwave Analyser"
+        run: |
+          set -eu
+          BULLETS=$(git tag -l --format='%(contents)' "$VERSION" 2>/dev/null \
+            | grep '^[[:space:]]*[-*]' \
+            | sed -e 's/^[[:space:]]*[-*][[:space:]]*//' \
+                  -e 's/[[:space:]]*$//' \
+            || true)
+          if [ -z "$BULLETS" ]; then
+            BULLETS="Stability and maintenance updates"
+          fi
+
+          DESC_BODY=$(printf '%s\n' "$BULLETS" \
+            | sed -e '/^[[:space:]]*$/d' \
+                  -e 's/[[:space:]]*\.$//' \
+                  -e 's/^/- /' \
+                  -e 's/$/./')
+
+          DESCRIPTION=$(printf "**What's new**\n%s\n\nInstall or update via the **Hardwave Suite**." "$DESC_BODY")
+          PUB_DATE=$(date -u +"%-d %b %Y")
+          FOOTER="${PLUGIN_NAME} · published ${PUB_DATE}"
+          TITLE="${PLUGIN_NAME} ${VERSION}"
+
+          PAYLOAD=$(jq -n \
+            --arg title "$TITLE" \
+            --arg description "$DESCRIPTION" \
+            --arg footer "$FOOTER" \
+            '{
+              "embeds": [{
+                "title": $title,
+                "description": $description,
+                "color": 14427686,
+                "footer": { "text": $footer }
+              }]
+            }')
+
+          curl -fsS -H "Content-Type: application/json" \
+            -d "$PAYLOAD" \
+            "$DISCORD_WEBHOOK_URL" >/dev/null
+          echo "Discord changelog posted for ${VERSION}"
+
