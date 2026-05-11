@@ -50,6 +50,14 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
 
+      - name: Install clang-cl (required by ring + cc-rs for MSVC cross-compile)
+        run: |
+          if ! command -v clang-cl >/dev/null 2>&1; then
+            sudo apt-get update -y && sudo apt-get install -y clang
+            sudo ln -sf "$(command -v clang)" /usr/local/bin/clang-cl
+          fi
+          clang-cl --version || (which clang && clang --version)
+
       - name: Install cargo-xwin
         run: cargo install cargo-xwin --locked
 
