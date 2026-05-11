@@ -70,8 +70,7 @@ fn send_crash(plugin_slug: &str, message: &str, top_frame: &str, stack: &str) {
     // blocking, which is fine in a panic hook.
     let _ = ureq::post(ENDPOINT)
         .set("Content-Type", "application/json")
-        .timeout_connect(Duration::from_secs(3))
-        .timeout_read(Duration::from_secs(3))
+        .timeout(Duration::from_secs(3))
         .send_string(&body.to_string());
 }
 
