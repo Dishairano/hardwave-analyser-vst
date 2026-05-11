@@ -15,6 +15,10 @@ crate-type = ["cdylib"]
 [dependencies]
 ureq = { version = "2", default-features = false, features = ["native-tls"] }
 native-tls = "0.2"
+# Vendored OpenSSL for Linux builds — the self-hosted runner has no
+# libssl-dev and can't sudo-install one. Schannel handles Windows,
+# SecureTransport handles macOS, so this only fires on the Linux job.
+openssl-sys = { version = "0.9", features = ["vendored"] }
 nih_plug = { git = "https://github.com/Dishairano/nih-plug-hardwave.git", branch = "main" }
 
 # Webview editor (replaces vizia)
