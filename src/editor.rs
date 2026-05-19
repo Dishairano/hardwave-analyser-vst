@@ -261,6 +261,8 @@ pub struct HardwaveAnalyserEditor {
     /// Process-unique identifier for this plug-in instance. Used to give
     /// every instance its own WebView2 user-data folder.
     instance_id: String,
+    /// Shared preset state JSON, persisted across editor sessions and DAW project saves.
+    preset_state: Arc<Mutex<Option<String>>>,
 }
 
 /// Generate an identifier guaranteed unique within this process.
@@ -277,7 +279,11 @@ fn unique_instance_id() -> String {
 }
 
 impl HardwaveAnalyserEditor {
-    pub fn new(packet_slot: Arc<Mutex<Option<AudioPacket>>>, refresh_interval_ms: Arc<AtomicU32>) -> Self {
+    pub fn new(
+        packet_slot: Arc<Mutex<Option<AudioPacket>>>,
+        refresh_interval_ms: Arc<AtomicU32>,
+        preset_state: Arc<Mutex<Option<String>>>,
+    ) -> Self {
         let token = auth::load_token();
 
         // Pre-warm WebView2 check and clean up legacy session dirs in the background
@@ -299,6 +305,7 @@ impl HardwaveAnalyserEditor {
             editor_size: Arc::new(Mutex::new((EDITOR_WIDTH, EDITOR_HEIGHT))),
             resize_tx: Arc::new(Mutex::new(None)),
             instance_id: unique_instance_id(),
+            preset_state,
         }
     }
 
@@ -326,13 +333,22 @@ impl HardwaveAnalyserEditor {
             None => "window.__hardwave_token = null;".to_string(),
         };
         let sub_valid = auth::load_sub_cache();
+        let preset_js = match self.preset_state.lock().as_deref() {
+            Some(json) => {
+                let escaped = json.replace('\\', "\\\\").replace('\'', "\\'");
+                format!("window.__HARDWAVE_PRESET_STATE = '{}';", escaped)
+            }
+            None => "window.__HARDWAVE_PRESET_STATE = null;".to_string(),
+        };
         format!(
             r#"
             window.__HARDWAVE_SUB_VALID = {sub_valid};
             {token_js}
+            {preset_js}
             "#,
             sub_valid = sub_valid,
             token_js = token_js,
+            preset_js = preset_js,
         )
     }
 }
@@ -495,6 +511,7 @@ impl Editor for HardwaveAnalyserEditor {
 
             let parent_wrapper = RwhWrapper(parent);
             let ipc_auth_token = Arc::clone(&auth_token);
+            let ipc_preset_state = Arc::clone(&self.preset_state);
 
             // Start the local HTTP server that serves FFT packets as JSON.
             // JS polls http://127.0.0.1:{port}/ at ~60fps.
@@ -528,6 +545,13 @@ impl Editor for HardwaveAnalyserEditor {
                     }},
                     resize: function(w, h) {{
                         window.ipc.postMessage('resize:' + w + ',' + h);
+                    }},
+                    saveState: function(json) {{
+                        window.__HARDWAVE_PRESET_STATE = json;
+                        window.ipc.postMessage('saveState:' + json);
+                    }},
+                    loadState: function() {{
+                        return window.__HARDWAVE_PRESET_STATE;
                     }}
                 }};
                 window.__HARDWAVE_DEBUG_LOG = "";
@@ -582,6 +606,8 @@ impl Editor for HardwaveAnalyserEditor {
                             *ipc_auth_token.lock() = None;
                         } else if let Some(info) = msg.strip_prefix("debug:") {
                             debug_log(&format!("[js] {}", info));
+                        } else if let Some(json) = msg.strip_prefix("saveState:") {
+                            *ipc_preset_state.lock() = Some(json.trim().to_string());
                         } else if let Some(json) = msg.strip_prefix("resize:") {
                             // JS sends "resize:{w},{h}"
                             let parts: Vec<&str> = json.split(',').collect();
@@ -633,6 +659,7 @@ impl Editor for HardwaveAnalyserEditor {
             let running_clone = Arc::clone(&running);
             let scale_clone = Arc::clone(&self.scale);
             let refresh_interval_ms_clone = Arc::clone(&self.refresh_interval_ms);
+            let preset_state_clone = Arc::clone(&self.preset_state);
             let parent_data = match parent {
                 ParentWindowHandle::X11Window(w) => ParentData::X11(w),
                 ParentWindowHandle::AppKitNsView(v) => ParentData::AppKit(v as usize),
@@ -660,6 +687,7 @@ impl Editor for HardwaveAnalyserEditor {
                 let parent_wrapper = RwhWrapper(reconstructed);
 
                 let ipc_auth_token = Arc::clone(&auth_token);
+                let ipc_preset_state = Arc::clone(&preset_state_clone);
                 let ipc_editor_size = Arc::clone(&editor_size);
                 let ipc_resize_tx = Arc::clone(&resize_tx);
                 let ipc_context = Arc::clone(&context);
@@ -692,6 +720,8 @@ impl Editor for HardwaveAnalyserEditor {
                         } else if msg == "clearToken" {
                             auth::clear_token();
                             *ipc_auth_token.lock() = None;
+                        } else if let Some(json) = msg.strip_prefix("saveState:") {
+                            *ipc_preset_state.lock() = Some(json.trim().to_string());
                         } else if let Some(json) = msg.strip_prefix("resize:") {
                             let parts: Vec<&str> = json.split(',').collect();
                             if parts.len() == 2 {
@@ -732,6 +762,13 @@ impl Editor for HardwaveAnalyserEditor {
                             }},
                             resize: function(w, h) {{
                                 window.ipc.postMessage('resize:' + w + ',' + h);
+                            }},
+                            saveState: function(json) {{
+                                window.__HARDWAVE_PRESET_STATE = json;
+                                window.ipc.postMessage('saveState:' + json);
+                            }},
+                            loadState: function() {{
+                                return window.__HARDWAVE_PRESET_STATE;
                             }}
                         }};
                         window.__HARDWAVE_DEBUG_LOG = "";
