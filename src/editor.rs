@@ -561,6 +561,7 @@ impl Editor for HardwaveAnalyserEditor {
                     }},
                     saveState: function(json) {{
                         window.__HARDWAVE_PRESET_STATE = json;
+                        window.ipc.postMessage('debug:saveState_called_len=' + (json ? json.length : 0));
                         window.ipc.postMessage('saveState:' + json);
                     }},
                     loadState: function() {{
@@ -568,6 +569,25 @@ impl Editor for HardwaveAnalyserEditor {
                     }}
                 }};
                 window.__HARDWAVE_DEBUG_LOG = "";
+
+                // Save state on page unload (catches FL close / webview destroy)
+                window.addEventListener('beforeunload', function() {{
+                    try {{
+                        var _cfg = localStorage.getItem('hw_analyser_config');
+                        var _pres = localStorage.getItem('hw_analyser_presets');
+                        var _def = localStorage.getItem('hw_analyser_default_preset');
+                        var _st = JSON.stringify({{
+                            config: _cfg ? JSON.parse(_cfg) : {{}},
+                            presets: _pres ? JSON.parse(_pres) : [],
+                            defaultPresetId: _def || null
+                        }});
+                        window.__HARDWAVE_PRESET_STATE = _st;
+                        window.ipc.postMessage('debug:beforeunload_save_len=' + _st.length);
+                        window.ipc.postMessage('saveState:' + _st);
+                    }} catch(_e) {{
+                        window.ipc.postMessage('debug:beforeunload_err=' + _e.message);
+                    }}
+                }});
 
                 // Block right-click, save, print, view-source, devtools
                 document.addEventListener('contextmenu', function(e) {{ e.preventDefault(); }});
