@@ -238,6 +238,50 @@ pub fn save_sub_cache(signed_token: &str) {
     let _ = fs::write(path, signed_token);
 }
 
+// ---------------------------------------------------------------------------
+// Preset state persistence (filesystem fallback for DAWs like FL Studio
+// that don't reliably save/restore VST3 custom state via IBStream).
+// ---------------------------------------------------------------------------
+
+fn preset_state_path() -> Option<PathBuf> {
+    hardwave_dir().map(|d| d.join("preset-state"))
+}
+
+/// Read the preset state JSON from disk. Returns None if the file doesn't
+/// exist or can't be read.
+pub fn load_preset_state() -> Option<String> {
+    let path = preset_state_path()?;
+    match fs::read_to_string(&path) {
+        Ok(s) => {
+            let trimmed = s.trim().to_string();
+            if trimmed.is_empty() { None } else { Some(trimmed) }
+        }
+        Err(e) => {
+            debug_log(&format!("[auth] load_preset_state: read failed {:?}: {}", path, e));
+            None
+        }
+    }
+}
+
+/// Write the preset state JSON to disk. The state is shared across all
+/// instances (not per-project) since FL Studio drops VST3 IBStream state.
+pub fn save_preset_state(json: &str) {
+    let path = match preset_state_path() {
+        Some(p) => p,
+        None => return,
+    };
+    if let Some(parent) = path.parent() {
+        if let Err(e) = fs::create_dir_all(parent) {
+            debug_log(&format!("[auth] save_preset_state: mkdir failed {:?}: {}", parent, e));
+            return;
+        }
+    }
+    match fs::write(&path, json) {
+        Ok(()) => debug_log(&format!("[auth] save_preset_state: wrote {} bytes to {:?}", json.len(), path)),
+        Err(e) => debug_log(&format!("[auth] save_preset_state: write failed {:?}: {}", path, e)),
+    }
+}
+
 /// Minimal base64 decode (standard alphabet, handles padding).
 fn base64_decode(s: &str) -> Option<Vec<u8>> {
     use base64::Engine as _;

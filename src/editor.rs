@@ -336,12 +336,22 @@ impl HardwaveAnalyserEditor {
             None => "window.__hardwave_token = null;".to_string(),
         };
         let sub_valid = auth::load_sub_cache();
-        let preset_js = match self.params.preset_state.read().as_deref() {
-            Some(json) => {
-                let escaped = json.replace('\\', "\\\\").replace('\'', "\\'");
-                format!("window.__HARDWAVE_PRESET_STATE = '{}';", escaped)
-            }
-            None => "window.__HARDWAVE_PRESET_STATE = null;".to_string(),
+        let preset_state_str = self.params.preset_state.read().clone();
+        let preset_state_str = match preset_state_str {
+            Some(ref v) if !v.is_empty() => v.clone(),
+            _ => match crate::auth::load_preset_state() {
+                Some(v) => {
+                    *self.params.preset_state.write() = Some(v.clone());
+                    v
+                }
+                None => String::new(),
+            },
+        };
+        let preset_js = if preset_state_str.is_empty() {
+            "window.__HARDWAVE_PRESET_STATE = null;".to_string()
+        } else {
+            let escaped = preset_state_str.replace('\\', "\\\\").replace('\'', "\\'");
+            format!("window.__HARDWAVE_PRESET_STATE = '{}';", escaped)
         };
         format!(
             r#"
@@ -611,6 +621,7 @@ impl Editor for HardwaveAnalyserEditor {
                             debug_log(&format!("[js] {}", info));
                         } else if let Some(json) = msg.strip_prefix("saveState:") {
                             *ipc_params.preset_state.write() = Some(json.trim().to_string());
+                            crate::auth::save_preset_state(json.trim());
                         } else if let Some(json) = msg.strip_prefix("resize:") {
                             // JS sends "resize:{w},{h}"
                             let parts: Vec<&str> = json.split(',').collect();
@@ -725,6 +736,7 @@ impl Editor for HardwaveAnalyserEditor {
                             *ipc_auth_token.lock() = None;
                         } else if let Some(json) = msg.strip_prefix("saveState:") {
                             *ipc_params.preset_state.write() = Some(json.trim().to_string());
+                            crate::auth::save_preset_state(json.trim());
                         } else if let Some(json) = msg.strip_prefix("resize:") {
                             let parts: Vec<&str> = json.split(',').collect();
                             if parts.len() == 2 {
