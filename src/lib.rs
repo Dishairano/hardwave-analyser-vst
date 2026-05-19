@@ -163,9 +163,6 @@ pub struct HardwaveAnalyser {
     #[cfg(feature = "gui")]
     refresh_interval_ms: Arc<AtomicU32>,
 
-    /// Shared preset state JSON, persisted between editor open/close and across DAW project saves
-    #[cfg(feature = "gui")]
-    preset_state: Arc<Mutex<Option<String>>>,
 }
 
 impl Default for HardwaveAnalyser {
@@ -177,9 +174,6 @@ impl Default for HardwaveAnalyser {
 
         #[cfg(feature = "gui")]
         let refresh_interval_ms = Arc::new(AtomicU32::new(16)); // 1000 / 60Hz
-
-        #[cfg(feature = "gui")]
-        let preset_state = Arc::new(Mutex::new(None));
 
         Self {
             params: Arc::new(HardwaveAnalyserParams::default()),
@@ -197,8 +191,6 @@ impl Default for HardwaveAnalyser {
             last_refresh_rate: 60,
             #[cfg(feature = "gui")]
             refresh_interval_ms,
-            #[cfg(feature = "gui")]
-            preset_state,
         }
     }
 }
@@ -248,7 +240,7 @@ impl Plugin for HardwaveAnalyser {
             Some(Box::new(editor::HardwaveAnalyserEditor::new(
                 Arc::clone(&self.packet_slot),
                 Arc::clone(&self.refresh_interval_ms),
-                Arc::clone(&self.preset_state),
+                Arc::clone(&self.params),
             )) as Box<dyn Editor>)
         }
         #[cfg(not(feature = "gui"))]

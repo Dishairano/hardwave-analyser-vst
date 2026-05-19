@@ -1,6 +1,7 @@
 //! Plugin parameters for Hardwave Analyser
 
 use nih_plug::prelude::*;
+use parking_lot::RwLock;
 use std::sync::Arc;
 
 /// Plugin parameters
@@ -21,6 +22,12 @@ pub struct HardwaveAnalyserParams {
     /// Window function: 0=Hann, 1=Blackman-Harris, 2=Kaiser
     #[id = "window_fn"]
     pub window_fn: IntParam,
+
+    /// Preset state JSON — persisted with the DAW project so the analyser
+    /// restores its view mode, selected preset, and custom settings after
+    /// project close/reopen.
+    #[persist = "preset_state"]
+    pub preset_state: RwLock<Option<String>>,
 }
 
 impl Default for HardwaveAnalyserParams {
@@ -68,6 +75,7 @@ impl Default for HardwaveAnalyserParams {
                     _ => None,
                 }
             })),
+            preset_state: RwLock::new(None),
         }
     }
 }
