@@ -15,6 +15,11 @@ When you deploy from the orchestrator:
 
 You can edit files in both this directory AND the webview directory. Use absolute paths for webview files.
 
+## Engineering Principles
+- **Quality over speed**: Deep, clean, easily expandable code. Not fast shipping.
+- **Performance**: Every allocation matters — pool buffers, avoid garbage, measure.
+- **Simplicity**: Prefer the straightforward solution. Fancy ≠ good.
+
 ## Git Workflow
 After completing any set of changes, ALWAYS commit and push to GitHub. Do not leave changes only in the local working directory.
 
