@@ -569,6 +569,7 @@ impl Editor for HardwaveAnalyserEditor {
                     }}
                 }};
                 window.__HARDWAVE_DEBUG_LOG = "";
+                try {{ window.ipc.postMessage('debug:init_script_running'); }} catch(_e) {{}}
 
                 // ── localStorage monkey-patch: save state to Rust every time React writes ──
                 // React stores state in these localStorage keys:
