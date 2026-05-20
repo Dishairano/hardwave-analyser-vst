@@ -394,14 +394,6 @@ impl HardwaveAnalyser {
         // Create and send packet
         let timestamp_ms = self.start_time.elapsed().as_millis() as u64;
 
-        // Log first 3 packets so we know FFT is running
-        if timestamp_ms < 3000 || timestamp_ms % 10000 < 100 {
-            Self::debug_log(&format!(
-                "send_fft_data: ts={}ms sr={} left_peak={:.1} bins={}",
-                timestamp_ms, self.sample_rate as u32, left_peak, left_bins.len()
-            ));
-        }
-
         // Extract oscilloscope waveform: last WAVE_SIZE samples.
         // buffer_left/right are already contiguous after make_contiguous() above.
         use protocol::WAVE_SIZE;

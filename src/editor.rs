@@ -788,6 +788,8 @@ impl Editor for HardwaveAnalyserEditor {
                         } else if msg == "clearToken" {
                             auth::clear_token();
                             *ipc_auth_token.lock() = None;
+                        } else if let Some(info) = msg.strip_prefix("debug:") {
+                            debug_log(&format!("[js] {}", info));
                         } else if let Some(json) = msg.strip_prefix("saveState:") {
                             *ipc_params.preset_state.write() = Some(json.trim().to_string());
                             crate::auth::save_preset_state(json.trim());
@@ -876,6 +878,7 @@ impl Editor for HardwaveAnalyserEditor {
                             setInterval(function() {{ _sendState(_getState()); }}, 3000);
                         }})();
 
+                        // ── Healthcheck: report runtime state to Rust log every 10s ──
                         setInterval(function() {{
                             var parts = [];
                             parts.push('hw=' + (typeof window.__hardwave));
