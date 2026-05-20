@@ -426,13 +426,14 @@ fn start_packet_server(
                          Connection: close\r\n\
                          \r\n".to_string()
                     } else if is_post {
-                        // POST /state — receive preset state from JS
                         let body_start = request.windows(4)
                             .position(|w| w == b"\r\n\r\n")
                             .map(|p| p + 4)
                             .unwrap_or(n);
                         let body = std::str::from_utf8(&request[body_start..n]).unwrap_or("");
-                        if !body.is_empty() && body != "null" {
+                        if request.starts_with(b"POST /debug/") {
+                            debug_log(&format!("POST debug: {}", &body[..body.len().min(500)]));
+                        } else if !body.is_empty() && body != "null" {
                             debug_log(&format!("POST /state: {} bytes", body.len()));
                             *params.preset_state.write() = Some(body.to_string());
                             crate::auth::save_preset_state(body);
