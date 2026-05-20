@@ -570,24 +570,48 @@ impl Editor for HardwaveAnalyserEditor {
                 }};
                 window.__HARDWAVE_DEBUG_LOG = "";
 
-                // Save state on page unload (catches FL close / webview destroy)
-                window.addEventListener('beforeunload', function() {{
-                    try {{
-                        var _cfg = localStorage.getItem('hw_analyser_config');
-                        var _pres = localStorage.getItem('hw_analyser_presets');
-                        var _def = localStorage.getItem('hw_analyser_default_preset');
-                        var _st = JSON.stringify({{
-                            config: _cfg ? JSON.parse(_cfg) : {{}},
-                            presets: _pres ? JSON.parse(_pres) : [],
-                            defaultPresetId: _def || null
-                        }});
-                        window.__HARDWAVE_PRESET_STATE = _st;
-                        window.ipc.postMessage('debug:beforeunload_save_len=' + _st.length);
-                        window.ipc.postMessage('saveState:' + _st);
-                    }} catch(_e) {{
-                        window.ipc.postMessage('debug:beforeunload_err=' + _e.message);
-                    }}
-                }});
+                // ── localStorage monkey-patch: save state to Rust every time React writes ──
+                // React stores state in these localStorage keys:
+                //   hw-analyser-config    (config)
+                //   hw-analyser-presets   (presets)
+                //   hw-analyser-default-preset (defaultPresetId)
+                (function() {{
+                    var _keys = ['hw-analyser-config', 'hw-analyser-presets', 'hw-analyser-default-preset'];
+                    var _getState = function() {{
+                        try {{
+                            var _cfg = localStorage.getItem('hw-analyser-config');
+                            var _pres = localStorage.getItem('hw-analyser-presets');
+                            var _def = localStorage.getItem('hw-analyser-default-preset');
+                            return JSON.stringify({{
+                                config: _cfg ? JSON.parse(_cfg) : {{}},
+                                presets: _pres ? JSON.parse(_pres) : [],
+                                defaultPresetId: _def || null
+                            }});
+                        }} catch(_e) {{ return null; }}
+                    }};
+                    // Install beforeunload handler
+                    window.addEventListener('beforeunload', function() {{
+                        var _st = _getState();
+                        if (_st) {{
+                            window.__HARDWAVE_PRESET_STATE = _st;
+                            window.ipc.postMessage('debug:beforeunload_save=' + _st.length);
+                            window.ipc.postMessage('saveState:' + _st);
+                        }}
+                    }});
+                    // Monkey-patch localStorage.setItem for real-time save
+                    var _orig = localStorage.setItem.bind(localStorage);
+                    localStorage.setItem = function(key, value) {{
+                        _orig(key, value);
+                        if (_keys.indexOf(key) !== -1) {{
+                            var _st = _getState();
+                            if (_st) {{
+                                window.__HARDWAVE_PRESET_STATE = _st;
+                                window.ipc.postMessage('debug:localstorage_setitem=' + key + ',' + _st.length);
+                                window.ipc.postMessage('saveState:' + _st);
+                            }}
+                        }}
+                    }};
+                }})();
 
                 // Block right-click, save, print, view-source, devtools
                 document.addEventListener('contextmenu', function(e) {{ e.preventDefault(); }});
