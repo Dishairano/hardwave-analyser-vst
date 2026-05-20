@@ -662,6 +662,11 @@ impl Editor for HardwaveAnalyserEditor {
                     let ipc_context = Arc::clone(&context);
                     move |req: wry::http::Request<String>| {
                         let msg = req.body().as_str();
+                        if msg.len() < 500 {
+                            debug_log(&format!("[ipc] {}", msg));
+                        } else {
+                            debug_log(&format!("[ipc] {}… ({} bytes)", &msg[..100], msg.len()));
+                        }
                         if let Some(token) = msg.strip_prefix("saveToken:") {
                             let token = token.trim().to_string();
                             auth::save_token(&token);
@@ -779,6 +784,11 @@ impl Editor for HardwaveAnalyserEditor {
                     })
                     .with_ipc_handler(move |req: wry::http::Request<String>| {
                         let msg = req.body().as_str();
+                        if msg.len() < 500 {
+                            debug_log(&format!("[ipc] {}", msg));
+                        } else {
+                            debug_log(&format!("[ipc] {}… ({} bytes)", &msg[..100], msg.len()));
+                        }
                         if let Some(token) = msg.strip_prefix("saveToken:") {
                             let token = token.trim().to_string();
                             auth::save_token(&token);
