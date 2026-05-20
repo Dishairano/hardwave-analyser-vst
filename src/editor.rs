@@ -347,6 +347,7 @@ impl HardwaveAnalyserEditor {
                 None => String::new(),
             },
         };
+        debug_log(&format!("preset_state injected: {} bytes", preset_state_str.len()));
         let preset_js = if preset_state_str.is_empty() {
             "window.__HARDWAVE_PRESET_STATE = null;".to_string()
         } else {
