@@ -431,12 +431,11 @@ fn start_packet_server(
                             .map(|p| p + 4)
                             .unwrap_or(n);
                         let body = std::str::from_utf8(&request[body_start..n]).unwrap_or("");
-                        if !body.is_empty() {
-                            let inner: String = serde_json::from_str(body).unwrap_or_default();
-                            if !inner.is_empty() && inner != "null" {
-                                *params.preset_state.write() = Some(inner.clone());
-                                crate::auth::save_preset_state(&inner);
-                            }
+                        if !body.is_empty() && body != "null" {
+                            debug_log(&format!("POST /state: {} bytes", body.len()));
+                            *params.preset_state.write() = Some(body.to_string());
+                            crate::auth::save_preset_state(body);
+                            debug_log("POST /state: saved");
                         }
                         "HTTP/1.1 200 OK\r\n\
                          Content-Type: application/json\r\n\
