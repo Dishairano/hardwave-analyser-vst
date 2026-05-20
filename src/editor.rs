@@ -569,50 +569,59 @@ impl Editor for HardwaveAnalyserEditor {
                     }}
                 }};
                 window.__HARDWAVE_DEBUG_LOG = "";
-                try {{ window.ipc.postMessage('debug:init_script_running'); }} catch(_e) {{}}
 
-                // ── localStorage monkey-patch: save state to Rust every time React writes ──
-                // React stores state in these localStorage keys:
-                //   hw-analyser-config    (config)
-                //   hw-analyser-presets   (presets)
-                //   hw-analyser-default-preset (defaultPresetId)
+                // ── Persistence: save state to Rust via IPC every time React writes to localStorage ──
+                // React stores state in keys: hw-analyser-config, hw-analyser-presets, hw-analyser-default-preset
                 (function() {{
                     var _keys = ['hw-analyser-config', 'hw-analyser-presets', 'hw-analyser-default-preset'];
+                    var _lastSaved = '';
+                    var _sendState = function(_st) {{
+                        if (!_st || _st === _lastSaved) return;
+                        _lastSaved = _st;
+                        window.__HARDWAVE_PRESET_STATE = _st;
+                        window.ipc.postMessage('saveState:' + _st);
+                    }};
                     var _getState = function() {{
                         try {{
                             var _cfg = localStorage.getItem('hw-analyser-config');
                             var _pres = localStorage.getItem('hw-analyser-presets');
                             var _def = localStorage.getItem('hw-analyser-default-preset');
-                            return JSON.stringify({{
+                            var _st = JSON.stringify({{
                                 config: _cfg ? JSON.parse(_cfg) : {{}},
                                 presets: _pres ? JSON.parse(_pres) : [],
                                 defaultPresetId: _def || null
                             }});
+                            return _st === '{{"config":{{}},"presets":[],"defaultPresetId":null}}' ? null : _st;
                         }} catch(_e) {{ return null; }}
                     }};
-                    // Install beforeunload handler
+                    // beforeunload: final save on page teardown
                     window.addEventListener('beforeunload', function() {{
-                        var _st = _getState();
-                        if (_st) {{
-                            window.__HARDWAVE_PRESET_STATE = _st;
-                            window.ipc.postMessage('debug:beforeunload_save=' + _st.length);
-                            window.ipc.postMessage('saveState:' + _st);
-                        }}
+                        _sendState(_getState());
                     }});
                     // Monkey-patch localStorage.setItem for real-time save
                     var _orig = localStorage.setItem.bind(localStorage);
                     localStorage.setItem = function(key, value) {{
                         _orig(key, value);
                         if (_keys.indexOf(key) !== -1) {{
-                            var _st = _getState();
-                            if (_st) {{
-                                window.__HARDWAVE_PRESET_STATE = _st;
-                                window.ipc.postMessage('debug:localstorage_setitem=' + key + ',' + _st.length);
-                                window.ipc.postMessage('saveState:' + _st);
-                            }}
+                            _sendState(_getState());
                         }}
                     }};
+                    // Poll every 3s as safety net (catches any React path that doesn't
+                    // go through our monkey-patch, e.g. direct __hardwave.saveState calls)
+                    setInterval(function() {{
+                        _sendState(_getState());
+                    }}, 3000);
                 }})();
+
+                // ── Healthcheck: report runtime state to Rust log every 10s ──
+                setInterval(function() {{
+                    var parts = [];
+                    parts.push('hw=' + (typeof window.__hardwave));
+                    parts.push('ss=' + (typeof window.__hardwave?.saveState));
+                    parts.push('ipc=' + (typeof window.ipc?.postMessage));
+                    parts.push('lk=' + (localStorage.getItem('hw-analyser-config') ? '1' : '0'));
+                    window.ipc.postMessage('debug:health|' + parts.join(','));
+                }}, 10000);
 
                 // Block right-click, save, print, view-source, devtools
                 document.addEventListener('contextmenu', function(e) {{ e.preventDefault(); }});
@@ -832,6 +841,49 @@ impl Editor for HardwaveAnalyserEditor {
                             }}
                         }};
                         window.__HARDWAVE_DEBUG_LOG = "";
+
+                        // ── Persistence: save state to Rust via IPC every time React writes ──
+                        (function() {{
+                            var _keys = ['hw-analyser-config', 'hw-analyser-presets', 'hw-analyser-default-preset'];
+                            var _lastSaved = '';
+                            var _sendState = function(_st) {{
+                                if (!_st || _st === _lastSaved) return;
+                                _lastSaved = _st;
+                                window.__HARDWAVE_PRESET_STATE = _st;
+                                window.ipc.postMessage('saveState:' + _st);
+                            }};
+                            var _getState = function() {{
+                                try {{
+                                    var _cfg = localStorage.getItem('hw-analyser-config');
+                                    var _pres = localStorage.getItem('hw-analyser-presets');
+                                    var _def = localStorage.getItem('hw-analyser-default-preset');
+                                    var _st = JSON.stringify({{
+                                        config: _cfg ? JSON.parse(_cfg) : {{}},
+                                        presets: _pres ? JSON.parse(_pres) : [],
+                                        defaultPresetId: _def || null
+                                    }});
+                                    return _st === '{{"config":{{}},"presets":[],"defaultPresetId":null}}' ? null : _st;
+                                }} catch(_e) {{ return null; }}
+                            }};
+                            window.addEventListener('beforeunload', function() {{
+                                _sendState(_getState());
+                            }});
+                            var _orig = localStorage.setItem.bind(localStorage);
+                            localStorage.setItem = function(key, value) {{
+                                _orig(key, value);
+                                if (_keys.indexOf(key) !== -1) _sendState(_getState());
+                            }};
+                            setInterval(function() {{ _sendState(_getState()); }}, 3000);
+                        }})();
+
+                        setInterval(function() {{
+                            var parts = [];
+                            parts.push('hw=' + (typeof window.__hardwave));
+                            parts.push('ss=' + (typeof window.__hardwave?.saveState));
+                            parts.push('ipc=' + (typeof window.ipc?.postMessage));
+                            parts.push('lk=' + (localStorage.getItem('hw-analyser-config') ? '1' : '0'));
+                            window.ipc.postMessage('debug:health|' + parts.join(','));
+                        }}, 10000);
 
                         // Block right-click, save, print, view-source, devtools
                         document.addEventListener('contextmenu', function(e) {{ e.preventDefault(); }});
