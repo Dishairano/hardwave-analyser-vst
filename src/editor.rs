@@ -652,35 +652,34 @@ impl Editor for HardwaveAnalyserEditor {
                     thread::spawn(move || {
                         thread::sleep(Duration::from_secs(3));
                         while poll_running.load(Ordering::Relaxed) {
-                            if let Ok(wv) = poll_wv.lock() {
-                                let last = Arc::clone(&poll_last);
-                                let params = Arc::clone(&poll_params);
-                                let _ = wv.0.evaluate_script_with_callback(
-                                    r#"(function(){
-                                        try {
-                                            var c=localStorage.getItem('hw-analyser-config');
-                                            var p=localStorage.getItem('hw-analyser-presets');
-                                            var d=localStorage.getItem('hw-analyser-default-preset');
-                                            if (!c && !p && !d) return null;
-                                            return JSON.stringify({
-                                                config: c ? JSON.parse(c) : {},
-                                                presets: p ? JSON.parse(p) : [],
-                                                defaultPresetId: d || null
-                                            });
-                                        } catch(e) { return null; }
-                                    })()"#,
-                                    move |result: String| {
-                                        if result == "null" || result.is_empty() { return; }
-                                        let inner: String = serde_json::from_str(&result).unwrap_or_default();
-                                        if inner.is_empty() || inner == "null" { return; }
-                                        let mut last = last.lock().unwrap();
-                                        if inner == *last { return; }
-                                        *last = inner.clone();
-                                        *params.preset_state.write() = Some(inner.clone());
-                                        crate::auth::save_preset_state(&inner);
-                                    },
-                                );
-                            }
+                            let wv = poll_wv.lock();
+                            let last = Arc::clone(&poll_last);
+                            let params = Arc::clone(&poll_params);
+                            let _ = wv.0.evaluate_script_with_callback(
+                                r#"(function(){
+                                    try {
+                                        var c=localStorage.getItem('hw-analyser-config');
+                                        var p=localStorage.getItem('hw-analyser-presets');
+                                        var d=localStorage.getItem('hw-analyser-default-preset');
+                                        if (!c && !p && !d) return null;
+                                        return JSON.stringify({
+                                            config: c ? JSON.parse(c) : {},
+                                            presets: p ? JSON.parse(p) : [],
+                                            defaultPresetId: d || null
+                                        });
+                                    } catch(e) { return null; }
+                                })()"#,
+                                move |result: String| {
+                                    if result == "null" || result.is_empty() { return; }
+                                    let inner: String = serde_json::from_str(&result).unwrap_or_default();
+                                    if inner.is_empty() || inner == "null" { return; }
+                                    let mut last = last.lock();
+                                    if inner == *last { return; }
+                                    *last = inner.clone();
+                                    *params.preset_state.write() = Some(inner.clone());
+                                    crate::auth::save_preset_state(&inner);
+                                },
+                            );
                             thread::sleep(Duration::from_secs(3));
                         }
                     });
