@@ -378,6 +378,7 @@ impl HardwaveAnalyserEditor {
 fn start_packet_server(
     packet_slot: Arc<Mutex<Option<crate::protocol::AudioPacket>>>,
     running: Arc<AtomicBool>,
+    params: Arc<HardwaveAnalyserParams>,
 ) -> u16 {
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -392,7 +393,6 @@ fn start_packet_server(
     let port = listener.local_addr().map(|a| a.port()).unwrap_or(0);
 
     thread::spawn(move || {
-        // HTTP accept loop (non-blocking so we can check `running`).
         listener.set_nonblocking(true).ok();
         let mut conn_count: u64 = 0;
         while running.load(Ordering::Relaxed) {
@@ -402,30 +402,54 @@ fn start_packet_server(
                     if conn_count <= 3 || conn_count % 300 == 0 {
                         debug_log(&format!("packet server: conn #{} from JS", conn_count));
                     }
-                    // Read the HTTP request to detect method (GET vs OPTIONS preflight).
-                    stream.set_read_timeout(Some(Duration::from_millis(10))).ok();
-                    let mut buf = [0u8; 1024];
-                    let n = stream.read(&mut buf).unwrap_or(0);
-                    let is_options = n >= 7 && &buf[..7] == b"OPTIONS";
+                    stream.set_read_timeout(Some(Duration::from_millis(50))).ok();
+                    let mut buf = vec![0u8; 65536];
+                    let n = match stream.read(&mut buf) {
+                        Ok(0) => continue,
+                        Ok(n) => n,
+                        Err(_) => continue,
+                    };
+                    let request = &buf[..n];
+
+                    // Determine HTTP method and path
+                    let is_post = request.starts_with(b"POST");
+                    let is_options = request.starts_with(b"OPTIONS");
 
                     let resp = if is_options {
-                        // CORS preflight response — no body needed.
                         "HTTP/1.1 204 No Content\r\n\
                          Access-Control-Allow-Origin: *\r\n\
-                         Access-Control-Allow-Methods: GET, OPTIONS\r\n\
+                         Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n\
                          Access-Control-Allow-Headers: *\r\n\
                          Access-Control-Max-Age: 86400\r\n\
                          Content-Length: 0\r\n\
                          Connection: close\r\n\
                          \r\n".to_string()
-                    } else {
-                        let body = {
-                            // Take the latest packet from the shared slot.
-                            match packet_slot.lock().take() {
-                                Some(p) => serde_json::to_string(&p)
-                                    .unwrap_or_else(|_| "null".to_string()),
-                                None => "null".to_string(),
+                    } else if is_post {
+                        // POST /state — receive preset state from JS
+                        let body_start = request.windows(4)
+                            .position(|w| w == b"\r\n\r\n")
+                            .map(|p| p + 4)
+                            .unwrap_or(n);
+                        let body = std::str::from_utf8(&request[body_start..n]).unwrap_or("");
+                        if !body.is_empty() {
+                            let inner: String = serde_json::from_str(body).unwrap_or_default();
+                            if !inner.is_empty() && inner != "null" {
+                                *params.preset_state.write() = Some(inner.clone());
+                                crate::auth::save_preset_state(&inner);
                             }
+                        }
+                        "HTTP/1.1 200 OK\r\n\
+                         Content-Type: application/json\r\n\
+                         Access-Control-Allow-Origin: *\r\n\
+                         Content-Length: 4\r\n\
+                         Connection: close\r\n\
+                         \r\nnull".to_string()
+                    } else {
+                        // GET / — FFT packet
+                        let body = match packet_slot.lock().take() {
+                            Some(p) => serde_json::to_string(&p)
+                                .unwrap_or_else(|_| "null".to_string()),
+                            None => "null".to_string(),
                         };
                         format!(
                             "HTTP/1.1 200 OK\r\n\
@@ -528,7 +552,11 @@ impl Editor for HardwaveAnalyserEditor {
 
             // Start the local HTTP server that serves FFT packets as JSON.
             // JS polls http://127.0.0.1:{port}/ at ~60fps.
-            let server_port = start_packet_server(Arc::clone(&packet_slot), Arc::clone(&running));
+            let server_port = start_packet_server(
+                Arc::clone(&packet_slot),
+                Arc::clone(&running),
+                Arc::clone(&self.params),
+            );
             sw.mark(&format!("packet server bound (port {})", server_port));
 
             let url = self.build_url(Some(server_port));
@@ -644,51 +672,12 @@ impl Editor for HardwaveAnalyserEditor {
                     sw.dump("WebViewBuilder::build() OK — webview visible");
 
                     let wv_arc = Arc::new(Mutex::new(SendWebView(wv)));
-                    let poll_wv = Arc::clone(&wv_arc);
-                    let poll_running = Arc::clone(&running);
-                    let running_handle = Arc::clone(&running);
-                    let poll_params = Arc::clone(&self.params);
-                    let poll_last = Arc::new(Mutex::new(String::new()));
-                    thread::spawn(move || {
-                        thread::sleep(Duration::from_secs(3));
-                        while poll_running.load(Ordering::Relaxed) {
-                            let wv = poll_wv.lock();
-                            let last = Arc::clone(&poll_last);
-                            let params = Arc::clone(&poll_params);
-                            let _ = wv.0.evaluate_script_with_callback(
-                                r#"(function(){
-                                    try {
-                                        var c=localStorage.getItem('hw-analyser-config');
-                                        var p=localStorage.getItem('hw-analyser-presets');
-                                        var d=localStorage.getItem('hw-analyser-default-preset');
-                                        if (!c && !p && !d) return null;
-                                        return JSON.stringify({
-                                            config: c ? JSON.parse(c) : {},
-                                            presets: p ? JSON.parse(p) : [],
-                                            defaultPresetId: d || null
-                                        });
-                                    } catch(e) { return null; }
-                                })()"#,
-                                move |result: String| {
-                                    if result == "null" || result.is_empty() { return; }
-                                    let inner: String = serde_json::from_str(&result).unwrap_or_default();
-                                    if inner.is_empty() || inner == "null" { return; }
-                                    let mut last = last.lock();
-                                    if inner == *last { return; }
-                                    *last = inner.clone();
-                                    *params.preset_state.write() = Some(inner.clone());
-                                    crate::auth::save_preset_state(&inner);
-                                },
-                            );
-                            thread::sleep(Duration::from_secs(3));
-                        }
-                    });
 
                     Box::new(EditorHandle {
                         _thread: None,
                         _webview: Some(wv_arc),
                         _web_context: Some(SendWebContext(web_context)),
-                        running: running_handle,
+                        running,
                     })
                 }
                 Err(e) => {
