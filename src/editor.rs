@@ -325,46 +325,6 @@ impl HardwaveAnalyserEditor {
         url
     }
 
-    /// Returns JS that injects auth globals before the page loads.
-    fn globals_init_script(&self) -> String {
-        let token = self.auth_token.lock();
-        let token_js = match token.as_deref() {
-            Some(t) => {
-                let escaped = t.replace('\\', "\\\\").replace('`', "\\`");
-                format!("window.__hardwave_token = `{}`;", escaped)
-            }
-            None => "window.__hardwave_token = null;".to_string(),
-        };
-        let sub_valid = auth::load_sub_cache();
-        let preset_state_str = self.params.preset_state.read().clone();
-        let preset_state_str = match preset_state_str {
-            Some(ref v) if !v.is_empty() => v.clone(),
-            _ => match crate::auth::load_preset_state() {
-                Some(v) => {
-                    *self.params.preset_state.write() = Some(v.clone());
-                    v
-                }
-                None => String::new(),
-            },
-        };
-        debug_log(&format!("preset_state injected: {} bytes", preset_state_str.len()));
-        let preset_js = if preset_state_str.is_empty() {
-            "window.__HARDWAVE_PRESET_STATE = null;".to_string()
-        } else {
-            let escaped = preset_state_str.replace('\\', "\\\\").replace('\'', "\\'");
-            format!("window.__HARDWAVE_PRESET_STATE = '{}';", escaped)
-        };
-        format!(
-            r#"
-            window.__HARDWAVE_SUB_VALID = {sub_valid};
-            {token_js}
-            {preset_js}
-            "#,
-            sub_valid = sub_valid,
-            token_js = token_js,
-            preset_js = preset_js,
-        )
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -380,6 +340,7 @@ fn start_packet_server(
     packet_slot: Arc<Mutex<Option<crate::protocol::AudioPacket>>>,
     running: Arc<AtomicBool>,
     params: Arc<HardwaveAnalyserParams>,
+    auth_token: Arc<Mutex<Option<String>>>,
 ) -> u16 {
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -446,11 +407,29 @@ fn start_packet_server(
                          Connection: close\r\n\
                          \r\nnull".to_string()
                     } else {
-                        // GET / — FFT packet
-                        let body = match packet_slot.lock().take() {
-                            Some(p) => serde_json::to_string(&p)
-                                .unwrap_or_else(|_| "null".to_string()),
-                            None => "null".to_string(),
+                        let path = std::str::from_utf8(request.split(|b| *b == b' ').nth(1).unwrap_or(b"")).unwrap_or("");
+                        let body = if path == "/init" {
+                            let token = auth_token.lock().clone().unwrap_or_default();
+                            let sub = crate::auth::load_sub_cache();
+                            let preset = {
+                                let s = params.preset_state.read().clone();
+                                match s {
+                                    Some(ref v) if !v.is_empty() => v.clone(),
+                                    _ => crate::auth::load_preset_state().unwrap_or_default(),
+                                }
+                            };
+                            serde_json::to_string(&serde_json::json!({
+                                "token": token,
+                                "subValid": sub,
+                                "presetState": preset,
+                            })).unwrap_or_else(|_| "null".to_string())
+                        } else {
+                            // GET / — FFT packet
+                            match packet_slot.lock().take() {
+                                Some(p) => serde_json::to_string(&p)
+                                    .unwrap_or_else(|_| "null".to_string()),
+                                None => "null".to_string(),
+                            }
                         };
                         format!(
                             "HTTP/1.1 200 OK\r\n\
@@ -491,7 +470,6 @@ impl Editor for HardwaveAnalyserEditor {
         let packet_slot = Arc::clone(&self.packet_slot);
         let running = Arc::new(AtomicBool::new(true));
         let auth_token = Arc::clone(&self.auth_token);
-        let globals_script = self.globals_init_script();
 
         // Resize channel: IPC/host → webview thread
         let (resize_tx_val, resize_rx) = crossbeam_channel::unbounded::<(u32, u32)>();
@@ -557,6 +535,7 @@ impl Editor for HardwaveAnalyserEditor {
                 Arc::clone(&packet_slot),
                 Arc::clone(&running),
                 Arc::clone(&self.params),
+                Arc::clone(&auth_token),
             );
             sw.mark(&format!("packet server bound (port {})", server_port));
 
@@ -572,27 +551,9 @@ impl Editor for HardwaveAnalyserEditor {
                 }});
 
                 window.__HARDWAVE_VST = true;
-                {globals_script}
                 window.__hardwave = {{
                     version: "{version}",
                     os: "{os}",
-                    saveToken: function(token) {{
-                        window.ipc.postMessage('saveToken:' + token);
-                    }},
-                    saveSubCache: function(signedToken) {{
-                        window.ipc.postMessage('saveSubCache:' + (signedToken || ''));
-                    }},
-                    clearToken: function() {{
-                        window.ipc.postMessage('clearToken');
-                    }},
-                    resize: function(w, h) {{
-                        window.ipc.postMessage('resize:' + w + ',' + h);
-                    }},
-                    saveState: function(json) {{
-                        window.__HARDWAVE_PRESET_STATE = json;
-                        // saveState is no longer sent via IPC (broken in wry).
-                        // Rust polls localStorage directly via evaluate_script instead.
-                    }},
                     loadState: function() {{
                         return window.__HARDWAVE_PRESET_STATE;
                     }}
@@ -606,7 +567,6 @@ impl Editor for HardwaveAnalyserEditor {
                     if (e.key === 'F12') e.preventDefault();
                 }});
                 "#,
-                globals_script = globals_script,
                 version = env!("CARGO_PKG_VERSION"),
                 os = PLUGIN_OS,
             );
@@ -787,25 +747,9 @@ impl Editor for HardwaveAnalyserEditor {
                         }});
 
                         window.__HARDWAVE_VST = true;
-                        {globals_script}
                         window.__hardwave = {{
                             version: "{version}",
                             os: "{os}",
-                            saveToken: function(token) {{
-                                window.ipc.postMessage('saveToken:' + token);
-                            }},
-                            saveSubCache: function(signedToken) {{
-                                window.ipc.postMessage('saveSubCache:' + (signedToken || ''));
-                            }},
-                            clearToken: function() {{
-                                window.ipc.postMessage('clearToken');
-                            }},
-                            resize: function(w, h) {{
-                                window.ipc.postMessage('resize:' + w + ',' + h);
-                            }},
-                            saveState: function(json) {{
-                                window.__HARDWAVE_PRESET_STATE = json;
-                            }},
                             loadState: function() {{
                                 return window.__HARDWAVE_PRESET_STATE;
                             }}
@@ -819,7 +763,6 @@ impl Editor for HardwaveAnalyserEditor {
                             if (e.key === 'F12') e.preventDefault();
                         }});
                         "#,
-                        globals_script = globals_script,
                         version = env!("CARGO_PKG_VERSION"),
                         os = PLUGIN_OS,
                     ))
