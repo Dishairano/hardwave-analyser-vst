@@ -561,67 +561,14 @@ impl Editor for HardwaveAnalyserEditor {
                     }},
                     saveState: function(json) {{
                         window.__HARDWAVE_PRESET_STATE = json;
-                        window.ipc.postMessage('debug:saveState_called_len=' + (json ? json.length : 0));
-                        window.ipc.postMessage('saveState:' + json);
+                        // saveState is no longer sent via IPC (broken in wry).
+                        // Rust polls localStorage directly via evaluate_script instead.
                     }},
                     loadState: function() {{
                         return window.__HARDWAVE_PRESET_STATE;
                     }}
                 }};
                 window.__HARDWAVE_DEBUG_LOG = "";
-
-                // ── Persistence: save state to Rust via IPC every time React writes to localStorage ──
-                // React stores state in keys: hw-analyser-config, hw-analyser-presets, hw-analyser-default-preset
-                (function() {{
-                    var _keys = ['hw-analyser-config', 'hw-analyser-presets', 'hw-analyser-default-preset'];
-                    var _lastSaved = '';
-                    var _sendState = function(_st) {{
-                        if (!_st || _st === _lastSaved) return;
-                        _lastSaved = _st;
-                        window.__HARDWAVE_PRESET_STATE = _st;
-                        window.ipc.postMessage('saveState:' + _st);
-                    }};
-                    var _getState = function() {{
-                        try {{
-                            var _cfg = localStorage.getItem('hw-analyser-config');
-                            var _pres = localStorage.getItem('hw-analyser-presets');
-                            var _def = localStorage.getItem('hw-analyser-default-preset');
-                            var _st = JSON.stringify({{
-                                config: _cfg ? JSON.parse(_cfg) : {{}},
-                                presets: _pres ? JSON.parse(_pres) : [],
-                                defaultPresetId: _def || null
-                            }});
-                            return _st === '{{"config":{{}},"presets":[],"defaultPresetId":null}}' ? null : _st;
-                        }} catch(_e) {{ return null; }}
-                    }};
-                    // beforeunload: final save on page teardown
-                    window.addEventListener('beforeunload', function() {{
-                        _sendState(_getState());
-                    }});
-                    // Monkey-patch localStorage.setItem for real-time save
-                    var _orig = localStorage.setItem.bind(localStorage);
-                    localStorage.setItem = function(key, value) {{
-                        _orig(key, value);
-                        if (_keys.indexOf(key) !== -1) {{
-                            _sendState(_getState());
-                        }}
-                    }};
-                    // Poll every 3s as safety net (catches any React path that doesn't
-                    // go through our monkey-patch, e.g. direct __hardwave.saveState calls)
-                    setInterval(function() {{
-                        _sendState(_getState());
-                    }}, 3000);
-                }})();
-
-                // ── Healthcheck: report runtime state to Rust log every 10s ──
-                setInterval(function() {{
-                    var parts = [];
-                    parts.push('hw=' + (typeof window.__hardwave));
-                    parts.push('ss=' + (typeof window.__hardwave?.saveState));
-                    parts.push('ipc=' + (typeof window.ipc?.postMessage));
-                    parts.push('lk=' + (localStorage.getItem('hw-analyser-config') ? '1' : '0'));
-                    window.ipc.postMessage('debug:health|' + parts.join(','));
-                }}, 10000);
 
                 // Block right-click, save, print, view-source, devtools
                 document.addEventListener('contextmenu', function(e) {{ e.preventDefault(); }});
@@ -662,11 +609,6 @@ impl Editor for HardwaveAnalyserEditor {
                     let ipc_context = Arc::clone(&context);
                     move |req: wry::http::Request<String>| {
                         let msg = req.body().as_str();
-                        if msg.len() < 500 {
-                            debug_log(&format!("[ipc] {}", msg));
-                        } else {
-                            debug_log(&format!("[ipc] {}… ({} bytes)", &msg[..100], msg.len()));
-                        }
                         if let Some(token) = msg.strip_prefix("saveToken:") {
                             let token = token.trim().to_string();
                             auth::save_token(&token);
@@ -676,11 +618,6 @@ impl Editor for HardwaveAnalyserEditor {
                         } else if msg == "clearToken" {
                             auth::clear_token();
                             *ipc_auth_token.lock() = None;
-                        } else if let Some(info) = msg.strip_prefix("debug:") {
-                            debug_log(&format!("[js] {}", info));
-                        } else if let Some(json) = msg.strip_prefix("saveState:") {
-                            *ipc_params.preset_state.write() = Some(json.trim().to_string());
-                            crate::auth::save_preset_state(json.trim());
                         } else if let Some(json) = msg.strip_prefix("resize:") {
                             // JS sends "resize:{w},{h}"
                             let parts: Vec<&str> = json.split(',').collect();
@@ -705,11 +642,54 @@ impl Editor for HardwaveAnalyserEditor {
             match webview {
                 Ok(wv) => {
                     sw.dump("WebViewBuilder::build() OK — webview visible");
+
+                    let wv_arc = Arc::new(Mutex::new(SendWebView(wv)));
+                    let poll_wv = Arc::clone(&wv_arc);
+                    let poll_running = Arc::clone(&running);
+                    let running_handle = Arc::clone(&running);
+                    let poll_params = Arc::clone(&self.params);
+                    let poll_last = Arc::new(Mutex::new(String::new()));
+                    thread::spawn(move || {
+                        thread::sleep(Duration::from_secs(3));
+                        while poll_running.load(Ordering::Relaxed) {
+                            if let Ok(wv) = poll_wv.lock() {
+                                let last = Arc::clone(&poll_last);
+                                let params = Arc::clone(&poll_params);
+                                let _ = wv.0.evaluate_script_with_callback(
+                                    r#"(function(){
+                                        try {
+                                            var c=localStorage.getItem('hw-analyser-config');
+                                            var p=localStorage.getItem('hw-analyser-presets');
+                                            var d=localStorage.getItem('hw-analyser-default-preset');
+                                            if (!c && !p && !d) return null;
+                                            return JSON.stringify({
+                                                config: c ? JSON.parse(c) : {},
+                                                presets: p ? JSON.parse(p) : [],
+                                                defaultPresetId: d || null
+                                            });
+                                        } catch(e) { return null; }
+                                    })()"#,
+                                    move |result: String| {
+                                        if result == "null" || result.is_empty() { return; }
+                                        let inner: String = serde_json::from_str(&result).unwrap_or_default();
+                                        if inner.is_empty() || inner == "null" { return; }
+                                        let mut last = last.lock().unwrap();
+                                        if inner == *last { return; }
+                                        *last = inner.clone();
+                                        *params.preset_state.write() = Some(inner.clone());
+                                        crate::auth::save_preset_state(&inner);
+                                    },
+                                );
+                            }
+                            thread::sleep(Duration::from_secs(3));
+                        }
+                    });
+
                     Box::new(EditorHandle {
                         _thread: None,
-                        _webview: Some(Arc::new(Mutex::new(SendWebView(wv)))),
+                        _webview: Some(wv_arc),
                         _web_context: Some(SendWebContext(web_context)),
-                        running,
+                        running: running_handle,
                     })
                 }
                 Err(e) => {
@@ -784,11 +764,6 @@ impl Editor for HardwaveAnalyserEditor {
                     })
                     .with_ipc_handler(move |req: wry::http::Request<String>| {
                         let msg = req.body().as_str();
-                        if msg.len() < 500 {
-                            debug_log(&format!("[ipc] {}", msg));
-                        } else {
-                            debug_log(&format!("[ipc] {}… ({} bytes)", &msg[..100], msg.len()));
-                        }
                         if let Some(token) = msg.strip_prefix("saveToken:") {
                             let token = token.trim().to_string();
                             auth::save_token(&token);
@@ -798,11 +773,6 @@ impl Editor for HardwaveAnalyserEditor {
                         } else if msg == "clearToken" {
                             auth::clear_token();
                             *ipc_auth_token.lock() = None;
-                        } else if let Some(info) = msg.strip_prefix("debug:") {
-                            debug_log(&format!("[js] {}", info));
-                        } else if let Some(json) = msg.strip_prefix("saveState:") {
-                            *ipc_params.preset_state.write() = Some(json.trim().to_string());
-                            crate::auth::save_preset_state(json.trim());
                         } else if let Some(json) = msg.strip_prefix("resize:") {
                             let parts: Vec<&str> = json.split(',').collect();
                             if parts.len() == 2 {
@@ -846,57 +816,12 @@ impl Editor for HardwaveAnalyserEditor {
                             }},
                             saveState: function(json) {{
                                 window.__HARDWAVE_PRESET_STATE = json;
-                                window.ipc.postMessage('saveState:' + json);
                             }},
                             loadState: function() {{
                                 return window.__HARDWAVE_PRESET_STATE;
                             }}
                         }};
                         window.__HARDWAVE_DEBUG_LOG = "";
-
-                        // ── Persistence: save state to Rust via IPC every time React writes ──
-                        (function() {{
-                            var _keys = ['hw-analyser-config', 'hw-analyser-presets', 'hw-analyser-default-preset'];
-                            var _lastSaved = '';
-                            var _sendState = function(_st) {{
-                                if (!_st || _st === _lastSaved) return;
-                                _lastSaved = _st;
-                                window.__HARDWAVE_PRESET_STATE = _st;
-                                window.ipc.postMessage('saveState:' + _st);
-                            }};
-                            var _getState = function() {{
-                                try {{
-                                    var _cfg = localStorage.getItem('hw-analyser-config');
-                                    var _pres = localStorage.getItem('hw-analyser-presets');
-                                    var _def = localStorage.getItem('hw-analyser-default-preset');
-                                    var _st = JSON.stringify({{
-                                        config: _cfg ? JSON.parse(_cfg) : {{}},
-                                        presets: _pres ? JSON.parse(_pres) : [],
-                                        defaultPresetId: _def || null
-                                    }});
-                                    return _st === '{{"config":{{}},"presets":[],"defaultPresetId":null}}' ? null : _st;
-                                }} catch(_e) {{ return null; }}
-                            }};
-                            window.addEventListener('beforeunload', function() {{
-                                _sendState(_getState());
-                            }});
-                            var _orig = localStorage.setItem.bind(localStorage);
-                            localStorage.setItem = function(key, value) {{
-                                _orig(key, value);
-                                if (_keys.indexOf(key) !== -1) _sendState(_getState());
-                            }};
-                            setInterval(function() {{ _sendState(_getState()); }}, 3000);
-                        }})();
-
-                        // ── Healthcheck: report runtime state to Rust log every 10s ──
-                        setInterval(function() {{
-                            var parts = [];
-                            parts.push('hw=' + (typeof window.__hardwave));
-                            parts.push('ss=' + (typeof window.__hardwave?.saveState));
-                            parts.push('ipc=' + (typeof window.ipc?.postMessage));
-                            parts.push('lk=' + (localStorage.getItem('hw-analyser-config') ? '1' : '0'));
-                            window.ipc.postMessage('debug:health|' + parts.join(','));
-                        }}, 10000);
 
                         // Block right-click, save, print, view-source, devtools
                         document.addEventListener('contextmenu', function(e) {{ e.preventDefault(); }});
