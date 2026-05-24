@@ -245,13 +245,27 @@ jobs:
           PLUGIN_NAME: "Hardwave Analyser"
         run: |
           set -eu
-          git fetch --tags --force >/dev/null 2>&1 || true
-          BULLETS=$(git tag -l --format='%(contents)' "$VERSION" 2>/dev/null \
-            | grep '^[[:space:]]*[-*]' \
-            | sed -e 's/^[[:space:]]*[-*][[:space:]]*//' \
-                  -e 's/[[:space:]]*$//' \
-            || true)
+          # Read bullets from CHANGELOG.md, scoped to the matching `## <VERSION>`
+          # section. Each section ends at the next `## v` header or EOF.
+          # Bullets are lines starting with `- ` or `* ` at the top level of
+          # that section — sub-bullets (indented) are ignored so the Discord
+          # post matches what a human would read as "what's new."
+          #
+          # If the CHANGELOG is missing or the section has no bullets, falls
+          # back to the placeholder so the post never breaks — but also logs
+          # a warning so the next contributor knows to fix the source.
+          BULLETS=""
+          if [ -f CHANGELOG.md ]; then
+            BULLETS=$(awk -v v="$VERSION" '
+              $0 ~ "^## " v "( |$)" { in_section=1; next }
+              in_section && /^## v/ { exit }
+              in_section && /^[*-] / { sub(/^[*-] /, ""); print }
+            ' CHANGELOG.md)
+          else
+            echo "WARNING: CHANGELOG.md missing — Discord post will fall back to placeholder" >&2
+          fi
           if [ -z "$BULLETS" ]; then
+            echo "WARNING: no bullets found in CHANGELOG.md for $VERSION — using placeholder" >&2
             BULLETS="Stability and maintenance updates"
           fi
 
