@@ -12,11 +12,20 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
-use std::sync::Once;
-use std::time::Duration;
+use std::sync::{Mutex, Once};
+use std::time::{Duration, Instant};
 
 const ENDPOINT: &str = "https://hardwavestudios.com/api/telemetry/crash";
 static INIT: Once = Once::new();
+
+/// Backtrace captured by the first (file-writer) panic hook, shared here so
+/// this hook doesn't pay for a second `force_capture` on the panicking
+/// thread — which, for panics caught inside `process()`, is the audio thread.
+pub(crate) static LAST_BACKTRACE: Mutex<Option<String>> = Mutex::new(None);
+
+/// (stack_hash, when) of the last report sent — repeated identical panics
+/// (e.g. one per process() call) post at most once a minute.
+static LAST_SENT: Mutex<Option<(String, Instant)>> = Mutex::new(None);
 
 /// Install a process-wide panic hook that forwards crash payloads to the
 /// telemetry endpoint. Safe to call from multiple `Plugin::initialize`
@@ -41,11 +50,21 @@ pub fn install(plugin_slug: &'static str) {
                 .location()
                 .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
                 .unwrap_or_else(|| "unknown".to_string());
-            let stack = std::backtrace::Backtrace::force_capture().to_string();
+            // Reuse the backtrace the file-writer hook already captured on
+            // this thread; only capture ourselves if it isn't there.
+            let stack = LAST_BACKTRACE
+                .lock()
+                .ok()
+                .and_then(|mut g| g.take())
+                .unwrap_or_else(|| std::backtrace::Backtrace::force_capture().to_string());
 
-            // Best-effort send — never re-panic out of a panic hook.
+            // Best-effort send — never re-panic out of a panic hook, and never
+            // block the panicking thread on network I/O (panics caught in
+            // process() run this hook on the audio thread).
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                send_crash(plugin_slug, &payload, &location, &stack);
+                std::thread::spawn(move || {
+                    send_crash(plugin_slug, &payload, &location, &stack);
+                });
             }));
         }));
     });
@@ -54,6 +73,17 @@ pub fn install(plugin_slug: &'static str) {
 fn send_crash(plugin_slug: &str, message: &str, top_frame: &str, stack: &str) {
     let machine_id = load_or_create_machine_id();
     let stack_hash = compute_stack_hash(plugin_slug, top_frame);
+
+    // Dedup: a panic that fires repeatedly (once per process() call) would
+    // otherwise post on every occurrence.
+    if let Ok(mut last) = LAST_SENT.lock() {
+        if let Some((ref h, at)) = *last {
+            if *h == stack_hash && at.elapsed() < Duration::from_secs(60) {
+                return;
+            }
+        }
+        *last = Some((stack_hash.clone(), Instant::now()));
+    }
 
     let body = serde_json::json!({
         "machine_id":  machine_id,

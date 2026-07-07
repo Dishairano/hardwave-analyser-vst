@@ -76,6 +76,11 @@ fn install_crash_handler() {
                     .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
                     .unwrap_or_else(|| "unknown location".to_string());
                 let bt = std::backtrace::Backtrace::force_capture();
+                // Stash for the telemetry hook (runs after this one) so it
+                // doesn't capture a second backtrace on the panicking thread.
+                if let Ok(mut g) = crash_reporter::LAST_BACKTRACE.lock() {
+                    *g = Some(bt.to_string());
+                }
 
                 let _ = writeln!(f, "========================================");
                 let _ = writeln!(f, "HARDWAVE ANALYSER CRASH REPORT");
@@ -122,8 +127,9 @@ pub struct HardwaveAnalyser {
     /// WebSocket client for streaming to the desktop app
     ws_client: WebSocketClient,
 
-    /// Shared slot for the latest FFT packet (written by audio thread, read by editor)
-    packet_slot: Arc<Mutex<Option<AudioPacket>>>,
+    /// Shared slot for the latest FFT packet (written by audio thread, read by
+    /// editor). Arc'd so the audio thread never deep-copies the ~37 KB packet.
+    packet_slot: Arc<Mutex<Option<std::sync::Arc<AudioPacket>>>>,
 
     // Editor is constructed fresh per `editor()` call — see comment on the
     // `editor()` impl below for why the previous one-shot Option pattern was
@@ -170,7 +176,7 @@ impl Default for HardwaveAnalyser {
         install_crash_handler();
         crash_reporter::install("analyser");
 
-        let packet_slot: Arc<Mutex<Option<AudioPacket>>> = Arc::new(Mutex::new(None));
+        let packet_slot: Arc<Mutex<Option<std::sync::Arc<AudioPacket>>>> = Arc::new(Mutex::new(None));
 
         #[cfg(feature = "gui")]
         let refresh_interval_ms = Arc::new(AtomicU32::new(16)); // 1000 / 60Hz
@@ -323,11 +329,12 @@ impl Plugin for HardwaveAnalyser {
         let num_samples = buffer.samples();
 
         // Process each sample
+        let channel_slices = buffer.as_slice();
         for sample_idx in 0..num_samples {
             // Get samples (handle mono by duplicating)
-            let left = buffer.as_slice()[0][sample_idx];
+            let left = channel_slices[0][sample_idx];
             let right = if num_channels > 1 {
-                buffer.as_slice()[1][sample_idx]
+                channel_slices[1][sample_idx]
             } else {
                 left
             };
@@ -347,7 +354,7 @@ impl Plugin for HardwaveAnalyser {
             self.samples_since_send += 1;
         }
 
-        // Send FFT data at ~20Hz
+        // Send FFT data at the configured refresh rate (60–144 Hz param)
         if self.samples_since_send >= self.samples_per_send && self.buffer_left.len() >= FFT_SIZE {
             // Catch panics so a crash in FFT/WS code doesn't take down the DAW.
             // The panic hook still writes the crash log before we get here.
@@ -423,8 +430,10 @@ impl HardwaveAnalyser {
             right_wave,
         );
 
-        // Send to WebSocket (desktop app)
-        self.ws_client.send(packet.clone());
+        // One shared allocation: the WS thread and the editor read the same
+        // packet through Arcs instead of the audio thread deep-copying it.
+        let packet = std::sync::Arc::new(packet);
+        self.ws_client.send(std::sync::Arc::clone(&packet));
 
         // Write latest packet to shared slot (editor thread takes it when ready)
         *self.packet_slot.lock() = Some(packet);

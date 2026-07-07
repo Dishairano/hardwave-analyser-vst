@@ -20,6 +20,20 @@ use crate::protocol::AudioPacket;
 
 /// Write a debug line to %TEMP%\hardwave-debug.log (Windows) or /tmp/hardwave-debug.log.
 #[allow(unused)]
+/// Truncate to at most `max` bytes without slicing through a multibyte
+/// UTF-8 character (a raw `&s[..max]` panics on a char boundary and would
+/// kill the packet-server thread).
+fn truncate_at_char_boundary(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 fn debug_log(msg: &str) {
     use std::io::Write;
     let path = {
@@ -249,7 +263,7 @@ struct SendWebView(wry::WebView);
 unsafe impl Send for SendWebView {}
 
 pub struct HardwaveAnalyserEditor {
-    packet_slot: Arc<Mutex<Option<AudioPacket>>>,
+    packet_slot: Arc<Mutex<Option<Arc<AudioPacket>>>>,
     auth_token: Arc<Mutex<Option<String>>>,
     /// Current display scale factor (stored as f32 bits for atomic access).
     scale: Arc<AtomicU32>,
@@ -283,7 +297,7 @@ fn unique_instance_id() -> String {
 
 impl HardwaveAnalyserEditor {
     pub fn new(
-        packet_slot: Arc<Mutex<Option<AudioPacket>>>,
+        packet_slot: Arc<Mutex<Option<Arc<AudioPacket>>>>,
         refresh_interval_ms: Arc<AtomicU32>,
         params: Arc<HardwaveAnalyserParams>,
     ) -> Self {
@@ -337,7 +351,7 @@ impl HardwaveAnalyserEditor {
 /// The server runs until `running` is set to false (EditorHandle dropped).
 #[cfg(target_os = "windows")]
 fn start_packet_server(
-    packet_slot: Arc<Mutex<Option<crate::protocol::AudioPacket>>>,
+    packet_slot: Arc<Mutex<Option<Arc<crate::protocol::AudioPacket>>>>,
     running: Arc<AtomicBool>,
     params: Arc<HardwaveAnalyserParams>,
     auth_token: Arc<Mutex<Option<String>>>,
@@ -393,7 +407,7 @@ fn start_packet_server(
                             .unwrap_or(n);
                         let body = std::str::from_utf8(&request[body_start..n]).unwrap_or("");
                         if request.starts_with(b"POST /debug/") {
-                            debug_log(&format!("POST debug: {}", &body[..body.len().min(500)]));
+                            debug_log(&format!("POST debug: {}", truncate_at_char_boundary(body, 500)));
                         } else if !body.is_empty() && body != "null" {
                             debug_log(&format!("POST /state: {} bytes", body.len()));
                             *params.preset_state.write() = Some(body.to_string());
@@ -426,7 +440,7 @@ fn start_packet_server(
                         } else {
                             // GET / — FFT packet
                             match packet_slot.lock().take() {
-                                Some(p) => serde_json::to_string(&p)
+                                Some(p) => serde_json::to_string(&*p)
                                     .unwrap_or_else(|_| "null".to_string()),
                                 None => "null".to_string(),
                             }
@@ -796,7 +810,7 @@ impl Editor for HardwaveAnalyserEditor {
                             }
 
                             if let Some(packet) = packet_slot.lock().take() {
-                                let json = serde_json::to_string(&packet).unwrap_or_default();
+                                let json = serde_json::to_string(&*packet).unwrap_or_default();
                                 let js = format!(
                                     "window.__onAudioPacket && window.__onAudioPacket({})",
                                     json

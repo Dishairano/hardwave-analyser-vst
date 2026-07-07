@@ -3,10 +3,10 @@ members = ["xtask"]
 
 [package]
 name = "hardwave-analyser"
-version = "1.0.18"
+version = "1.0.19"
 edition = "2021"
 authors = ["Hardwave Studios"]
-license = "MIT"
+license = "GPL-3.0-only"
 description = "VST3/CLAP spectrum analyser plugin with embedded webview UI"
 
 [lib]

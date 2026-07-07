@@ -1,5 +1,14 @@
 # Hardwave Analyser — Changelog
 
+## v1.0.19 — Stability & performance (2026-07-07)
+
+- Fixed a freeze of up to 5 seconds when removing the plugin or closing a project — plugin shutdown no longer waits out the connection-retry timer.
+- Lower CPU impact on the audio thread: the FFT engine now runs with preallocated buffers and the analysis data is shared with the UI without copying, so heavy sessions stay smooth.
+- Crash reporting no longer stalls audio: reports upload in the background, and repeated identical crashes are sent only once per minute.
+- Fixed a rare crash in the plugin's local data server when logging non-ASCII debug text.
+- License metadata corrected to GPL-3.0 (matching the earlier relicense).
+
+
 ## v1.0.18 — Preset state persistence (2026-05-20)
 
 - Preset state now persists across DAW reloads. The Rust `HardwaveAnalyserParams` struct has a `#[persist = "preset_state"]` field that nih-plug serialises into the DAW project, then re-injects on load. Your custom band layouts, color themes, and scale choices survive a DAW close → reopen.

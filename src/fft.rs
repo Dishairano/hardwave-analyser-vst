@@ -5,8 +5,9 @@
 //! Supports Hann, Blackman-Harris, and Kaiser window functions.
 //! Includes true-peak metering via 4× oversampling.
 
-use rustfft::{num_complex::Complex, FftPlanner};
+use rustfft::{num_complex::Complex, Fft, FftPlanner};
 use std::f32::consts::PI;
+use std::sync::Arc as StdArc;
 
 use crate::protocol::NUM_BINS;
 
@@ -104,8 +105,11 @@ fn build_window(wf: WindowFn, size: usize) -> Vec<f32> {
 
 /// FFT processor for a single channel
 pub struct FftProcessor {
-    planner: FftPlanner<f32>,
+    /// FFT plan, created once — FFT_SIZE never changes at runtime.
+    fft: StdArc<dyn Fft<f32>>,
     fft_buffer: Vec<Complex<f32>>,
+    /// Preallocated scratch so process() never allocates on the audio thread.
+    fft_scratch: Vec<Complex<f32>>,
     window: Vec<f32>,
     window_fn: WindowFn,
     /// Accumulator for Welch's method averaging
@@ -116,9 +120,12 @@ impl FftProcessor {
     pub fn new() -> Self {
         let wf = WindowFn::Hann;
         let window = build_window(wf, FFT_SIZE);
+        let fft = FftPlanner::new().plan_fft_forward(FFT_SIZE);
+        let scratch_len = fft.get_inplace_scratch_len();
         Self {
-            planner: FftPlanner::new(),
+            fft,
             fft_buffer: vec![Complex::new(0.0, 0.0); FFT_SIZE],
+            fft_scratch: vec![Complex::new(0.0, 0.0); scratch_len],
             window,
             window_fn: wf,
             welch_accum: vec![0.0; NUM_BINS],
@@ -159,8 +166,6 @@ impl FftProcessor {
             *v = 0.0;
         }
 
-        let fft = self.planner.plan_fft_forward(FFT_SIZE);
-
         for seg in 0..max_segments {
             let start = seg * hop;
             if start + FFT_SIZE > samples.len() {
@@ -173,7 +178,8 @@ impl FftProcessor {
                     Complex::new(samples[start + i] * self.window[i], 0.0);
             }
 
-            fft.process(&mut self.fft_buffer);
+            self.fft
+                .process_with_scratch(&mut self.fft_buffer, &mut self.fft_scratch);
 
             // Accumulate magnitude squared (power spectrum)
             for i in 0..NUM_BINS {
