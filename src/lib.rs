@@ -392,11 +392,11 @@ impl HardwaveAnalyser {
         // Make VecDeque storage contiguous so we can take a slice.
         let left_slice = self.buffer_left.make_contiguous();
         let left_bins = self.fft_left.process(left_slice, self.sample_rate);
-        let (left_peak, left_rms, _left_true_peak) = FftProcessor::calculate_levels(left_slice);
+        let (left_peak, left_rms, left_true_peak) = FftProcessor::calculate_levels(left_slice);
 
         let right_slice = self.buffer_right.make_contiguous();
         let right_bins = self.fft_right.process(right_slice, self.sample_rate);
-        let (right_peak, right_rms, _right_true_peak) = FftProcessor::calculate_levels(right_slice);
+        let (right_peak, right_rms, right_true_peak) = FftProcessor::calculate_levels(right_slice);
 
         // Create and send packet
         let timestamp_ms = self.start_time.elapsed().as_millis() as u64;
@@ -428,6 +428,8 @@ impl HardwaveAnalyser {
             right_rms,
             left_wave,
             right_wave,
+            left_true_peak,
+            right_true_peak,
         );
 
         // One shared allocation: the WS thread and the editor read the same

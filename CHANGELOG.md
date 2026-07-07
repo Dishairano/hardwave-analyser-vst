@@ -1,5 +1,13 @@
 # Hardwave Analyser — Changelog
 
+## v1.0.20 — Preset persistence everywhere + true peak (2026-07-07)
+
+- Preset state, custom layouts and themes now survive DAW reloads on macOS and Linux too — previously this only worked on Windows.
+- The subscription status flag now reaches the UI on every platform, not just Windows.
+- The plugin now sends genuine 4×-oversampled true peak to the UI — the TP readout becomes a real dBTP measurement (UI update rolling out alongside).
+- Older Hardwave Suite versions keep working with the new data format.
+
+
 ## v1.0.19 — Stability & performance (2026-07-07)
 
 - Fixed a freeze of up to 5 seconds when removing the plugin or closing a project — plugin shutdown no longer waits out the connection-retry timer.

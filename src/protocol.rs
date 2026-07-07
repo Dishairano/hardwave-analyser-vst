@@ -54,6 +54,20 @@ pub struct AudioPacket {
 
     /// Right channel oscilloscope waveform samples, linear amplitude -1..1, length = WAVE_SIZE
     pub right_wave: Vec<f32>,
+
+    /// Left channel true peak in dBTP (4× oversampled).
+    /// Appended fields: bincode's `deserialize` allows trailing bytes, so
+    /// older consumers still parse the prefix; JSON consumers ignore extras.
+    #[serde(default = "default_true_peak")]
+    pub left_true_peak: f32,
+
+    /// Right channel true peak in dBTP (4× oversampled).
+    #[serde(default = "default_true_peak")]
+    pub right_true_peak: f32,
+}
+
+fn default_true_peak() -> f32 {
+    -100.0
 }
 
 impl AudioPacket {
@@ -69,6 +83,8 @@ impl AudioPacket {
         right_rms: f32,
         left_wave: Vec<f32>,
         right_wave: Vec<f32>,
+        left_true_peak: f32,
+        right_true_peak: f32,
     ) -> Self {
         Self {
             packet_type: PACKET_TYPE_FFT,
@@ -82,6 +98,8 @@ impl AudioPacket {
             right_rms,
             left_wave,
             right_wave,
+            left_true_peak,
+            right_true_peak,
         }
     }
 
@@ -100,6 +118,8 @@ impl AudioPacket {
             right_rms: 0.0,
             left_wave: vec![],
             right_wave: vec![],
+            left_true_peak: -100.0,
+            right_true_peak: -100.0,
         }
     }
 
@@ -131,6 +151,8 @@ mod tests {
             0.5,
             vec![0.0; WAVE_SIZE],
             vec![0.0; WAVE_SIZE],
+            -1.2,
+            -1.2,
         );
 
         let bytes = packet.to_bytes();
@@ -140,6 +162,47 @@ mod tests {
         assert_eq!(decoded.sample_rate, 48000);
         assert_eq!(decoded.timestamp_ms, 12345);
         assert_eq!(decoded.left_bins.len(), NUM_BINS);
+        assert_eq!(decoded.left_true_peak, -1.2);
+    }
+
+    /// Old consumers (pre-true-peak struct) must still parse new packets:
+    /// bincode's `deserialize` permits trailing bytes.
+    #[test]
+    fn test_backward_compat_trailing_bytes() {
+        #[derive(serde::Deserialize)]
+        struct OldPacket {
+            packet_type: u8,
+            sample_rate: u32,
+            timestamp_ms: u64,
+            left_bins: Vec<f32>,
+            right_bins: Vec<f32>,
+            left_peak: f32,
+            right_peak: f32,
+            left_rms: f32,
+            right_rms: f32,
+            left_wave: Vec<f32>,
+            right_wave: Vec<f32>,
+        }
+
+        let packet = AudioPacket::new_fft(
+            48000,
+            7,
+            vec![-60.0; NUM_BINS],
+            vec![-60.0; NUM_BINS],
+            -3.0,
+            -3.0,
+            0.5,
+            0.5,
+            vec![0.0; WAVE_SIZE],
+            vec![0.0; WAVE_SIZE],
+            -0.4,
+            -0.4,
+        );
+        let bytes = packet.to_bytes();
+        let old: OldPacket = bincode::deserialize(&bytes).expect("old struct must tolerate appended fields");
+        assert_eq!(old.packet_type, PACKET_TYPE_FFT);
+        assert_eq!(old.timestamp_ms, 7);
+        assert_eq!(old.right_wave.len(), WAVE_SIZE);
     }
 
     #[test]
@@ -155,6 +218,8 @@ mod tests {
             0.5,
             vec![0.0; WAVE_SIZE],
             vec![0.0; WAVE_SIZE],
+            -1.0,
+            -1.0,
         );
 
         let bytes = packet.to_bytes();

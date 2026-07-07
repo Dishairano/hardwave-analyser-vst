@@ -621,6 +621,15 @@ impl Editor for HardwaveAnalyserEditor {
                         } else if msg == "clearToken" {
                             auth::clear_token();
                             *ipc_auth_token.lock() = None;
+                        } else if let Some(state) = msg.strip_prefix("saveState:") {
+                            // Preset/config state from the webview. Windows
+                            // normally saves via POST /state on the packet
+                            // server; this IPC path is the belt-and-braces
+                            // fallback and the primary path on other OSes.
+                            if !state.is_empty() && state != "null" {
+                                *ipc_params.preset_state.write() = Some(state.to_string());
+                                auth::save_preset_state(state);
+                            }
                         } else if let Some(json) = msg.strip_prefix("resize:") {
                             // JS sends "resize:{w},{h}"
                             let parts: Vec<&str> = json.split(',').collect();
@@ -707,6 +716,34 @@ impl Editor for HardwaveAnalyserEditor {
                 let ipc_editor_size = Arc::clone(&editor_size);
                 let ipc_resize_tx = Arc::clone(&resize_tx);
                 let ipc_context = Arc::clone(&context);
+
+                // Initial state for the init script — the same data the
+                // Windows packet server serves from /init. Without this,
+                // preset persistence and the offline-subscription flag
+                // never reached the UI on Linux/macOS.
+                let initial_preset_state = {
+                    let s = params_clone.preset_state.read().clone();
+                    match s {
+                        Some(ref v) if !v.is_empty() => v.clone(),
+                        _ => auth::load_preset_state().unwrap_or_default(),
+                    }
+                };
+                let preset_state_line = if initial_preset_state.is_empty() {
+                    String::new()
+                } else {
+                    // serde_json::to_string produces a quoted, escaped JS
+                    // string literal — safe to splice into the script.
+                    format!(
+                        "window.__HARDWAVE_PRESET_STATE = {};",
+                        serde_json::to_string(&initial_preset_state)
+                            .unwrap_or_else(|_| "undefined".to_string())
+                    )
+                };
+                let sub_valid_line = format!(
+                    "window.__HARDWAVE_SUB_VALID = {};",
+                    auth::load_sub_cache()
+                );
+
                 let webview = wry::WebViewBuilder::new()
                     .with_bounds(wry::Rect {
                         position: wry::dpi::LogicalPosition::new(0, 0).into(),
@@ -736,6 +773,13 @@ impl Editor for HardwaveAnalyserEditor {
                         } else if msg == "clearToken" {
                             auth::clear_token();
                             *ipc_auth_token.lock() = None;
+                        } else if let Some(state) = msg.strip_prefix("saveState:") {
+                            // Primary state-save path on Linux/macOS (no
+                            // packet server here) — mirrors POST /state.
+                            if !state.is_empty() && state != "null" {
+                                *ipc_params.preset_state.write() = Some(state.to_string());
+                                auth::save_preset_state(state);
+                            }
                         } else if let Some(json) = msg.strip_prefix("resize:") {
                             let parts: Vec<&str> = json.split(',').collect();
                             if parts.len() == 2 {
@@ -761,11 +805,16 @@ impl Editor for HardwaveAnalyserEditor {
                         }});
 
                         window.__HARDWAVE_VST = true;
+                        {preset_state_line}
+                        {sub_valid_line}
                         window.__hardwave = {{
                             version: "{version}",
                             os: "{os}",
                             loadState: function() {{
                                 return window.__HARDWAVE_PRESET_STATE;
+                            }},
+                            saveState: function(s) {{
+                                try {{ window.ipc.postMessage('saveState:' + s); }} catch (e) {{}}
                             }}
                         }};
                         window.__HARDWAVE_DEBUG_LOG = "";
@@ -777,6 +826,8 @@ impl Editor for HardwaveAnalyserEditor {
                             if (e.key === 'F12') e.preventDefault();
                         }});
                         "#,
+                        preset_state_line = preset_state_line,
+                        sub_valid_line = sub_valid_line,
                         version = env!("CARGO_PKG_VERSION"),
                         os = PLUGIN_OS,
                     ))
