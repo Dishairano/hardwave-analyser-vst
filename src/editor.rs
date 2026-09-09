@@ -71,13 +71,13 @@ impl Stopwatch {
 
     fn dump(&mut self, label: &str) {
         self.mark(label);
-        let mut lines = vec![format!("=== SPAWN TIMING ===")];
+        let mut lines = vec!["=== SPAWN TIMING ===".to_string()];
         let mut prev = 0u128;
         for (name, ms) in &self.marks {
             lines.push(format!("  {:>6} ms  (+{} ms)  {}", ms, ms - prev, name));
             prev = *ms;
         }
-        lines.push(format!("===================="));
+        lines.push("====================".to_string());
         debug_log(&lines.join("\n"));
     }
 }
