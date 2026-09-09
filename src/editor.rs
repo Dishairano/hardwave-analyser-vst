@@ -58,6 +58,7 @@ struct Stopwatch {
     marks: Vec<(String, u128)>,
 }
 
+#[allow(dead_code)]
 impl Stopwatch {
     fn new(label: &str) -> Self {
         let start = std::time::Instant::now();
@@ -259,6 +260,7 @@ unsafe impl Send for ParentData {}
 /// SAFETY: On Windows, we create the webview on the DAW's UI thread and only
 /// access it from a background thread for evaluate_script calls, which WebView2
 /// marshals to the UI thread internally.
+#[allow(dead_code)]
 struct SendWebView(wry::WebView);
 unsafe impl Send for SendWebView {}
 
@@ -275,6 +277,7 @@ pub struct HardwaveAnalyserEditor {
     resize_tx: Arc<Mutex<Option<crossbeam_channel::Sender<(u32, u32)>>>>,
     /// Process-unique identifier for this plug-in instance. Used to give
     /// every instance its own WebView2 user-data folder.
+    #[allow(dead_code)]
     instance_id: String,
     /// Plugin parameters, including the persisted preset_state field.
     /// Shared with the Plugin struct via Arc so nih-plug's DAW save/load
@@ -921,6 +924,7 @@ impl Editor for HardwaveAnalyserEditor {
 }
 
 /// Wrapper to make wry::WebContext sendable across threads.
+#[allow(dead_code)]
 struct SendWebContext(wry::WebContext);
 unsafe impl Send for SendWebContext {}
 
