@@ -34,3 +34,9 @@ jobs:
         run: cargo clippy --release -- -D warnings
       - name: Tests
         run: cargo test --release
+      - name: Build plugin bundle
+        run: cargo xtask bundle hardwave-analyser --release
+      - name: Security audit
+        run: |
+          cargo install cargo-audit --locked
+          cargo audit
