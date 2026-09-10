@@ -92,17 +92,14 @@ impl WebSocketClient {
         while !shutdown.load(Ordering::Relaxed) {
             let port = *server_port.lock();
 
-            match Self::try_connect(port) {
-                Ok(mut socket) => {
+            if let Ok(mut socket) = Self::try_connect(port) {
+                reconnect_delay = Duration::from_millis(100);
+                Self::handle_connection(&mut socket, &receiver, &shutdown, &server_port, port);
+                // If the port changed, reconnect immediately without backoff.
+                if *server_port.lock() != port {
                     reconnect_delay = Duration::from_millis(100);
-                    Self::handle_connection(&mut socket, &receiver, &shutdown, &server_port, port);
-                    // If the port changed, reconnect immediately without backoff.
-                    if *server_port.lock() != port {
-                        reconnect_delay = Duration::from_millis(100);
-                        continue;
-                    }
+                    continue;
                 }
-                Err(_) => {}
             }
 
             // Wait before reconnecting — interruptibly. A message on (or drop

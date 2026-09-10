@@ -6,10 +6,12 @@ use serde::{Deserialize, Serialize};
 pub const NUM_BINS: usize = 4096;
 
 /// Minimum analysis frequency in Hz (sub-bass visibility)
+#[allow(dead_code)]
 pub const MIN_FREQ_HZ: f32 = 5.0;
 
 /// Maximum analysis frequency defaults to Nyquist (sample_rate / 2).
 /// This constant is used as a sentinel; the actual max is computed at runtime.
+#[allow(dead_code)]
 pub const MAX_FREQ_HZ_DEFAULT: f32 = 0.0;
 
 /// Number of time-domain samples sent per packet for the oscilloscope

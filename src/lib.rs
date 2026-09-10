@@ -5,6 +5,7 @@
 //! When built with the `gui` feature, it also embeds a wry webview that loads
 //! the Hardwave Analyser from hardwave.studio inside the DAW plugin window.
 
+#![allow(clippy::needless_range_loop, clippy::too_many_arguments, clippy::type_complexity)]
 mod auth;
 #[cfg(feature = "gui")]
 mod editor;
@@ -90,7 +91,7 @@ fn install_crash_handler() {
                 let _ = writeln!(f, "Arch:     {}", std::env::consts::ARCH);
                 let _ = writeln!(f, "Location: {}", location);
                 let _ = writeln!(f, "Message:  {}", payload);
-                let _ = writeln!(f, "");
+                let _ = writeln!(f);
                 let _ = writeln!(f, "Backtrace:");
                 let _ = writeln!(f, "{}", bt);
                 let _ = writeln!(f, "========================================");
@@ -359,7 +360,7 @@ impl Plugin for HardwaveAnalyser {
             // Catch panics so a crash in FFT/WS code doesn't take down the DAW.
             // The panic hook still writes the crash log before we get here.
             let wrapper = std::panic::AssertUnwindSafe(|| self.send_fft_data());
-            if std::panic::catch_unwind(move || wrapper()).is_err() {
+            if std::panic::catch_unwind(wrapper).is_err() {
                 Self::debug_log("PANIC caught in send_fft_data — see crash log");
             }
             self.samples_since_send = 0;
