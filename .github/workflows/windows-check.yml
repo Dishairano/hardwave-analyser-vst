@@ -1,0 +1,74 @@
+name: Windows check
+
+# A build-only check for the Windows failures the OS testers report. It publishes nothing:
+# no release, no Discord post, no version change. Push to the branch to run it.
+#
+# Two things are under test here:
+#  1. Building on a real Windows runner instead of cross-compiling with cargo-xwin. The
+#     cross-compiled v1.0.20 crashes the CLAP validator's process-audio tests on Windows
+#     (0xc0000005) while the same code passes on Linux and macOS.
+#  2. The nih-plug fix for loading a damaged state, which aborted the host on every platform.
+
+on:
+  push:
+    branches: [ci/windows-check]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Build
+        run: cargo xtask bundle hardwave-analyser --release
+
+      - name: Get the CLAP validator
+        run: |
+          curl -sL -o cv.zip https://github.com/free-audio/clap-validator/releases/download/0.4.1/clap-validator-0.4.1-127-g152b982-windows.zip
+          7z x -y cv.zip -ocv >/dev/null
+          # Some of these releases hold a tarball inside the zip.
+          for f in cv/*.tar.gz; do [ -e "$f" ] && tar xzf "$f" -C cv; done
+          find cv -name 'clap-validator*'
+
+      - name: Validate the CLAP
+        run: |
+          CV=$(find cv -name 'clap-validator.exe' | head -1)
+          "$CV" validate --json results.json target/bundled/hardwave-analyser.clap || true
+          cat results.json
+
+      - name: Report
+        run: |
+          python - <<'PY'
+          import json, sys
+          results = json.load(open("results.json"))["results"]
+          bad = [r for r in results if r["status"]["code"] in ("failed", "crashed")]
+          for r in bad:
+              name = r["test"]["plugin-instance"]["test"]
+              print(f"{r['status']['code']:>8}  {name}: {str(r['status'].get('details'))[:200]}")
+          crashed = [r for r in bad if r["status"]["code"] == "crashed"]
+          print(f"\n{len(results)} tests, {len(bad)} not ok, {len(crashed)} crashed")
+          sys.exit(1 if crashed else 0)
+          PY
+
+      - name: Upload the build and the results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-check
+          path: |
+            results.json
+            target/bundled/hardwave-analyser.clap
+            target/bundled/hardwave-analyser.vst3
