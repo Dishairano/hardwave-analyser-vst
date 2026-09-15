@@ -245,10 +245,28 @@ jobs:
         if: ${{ env.DISCORD_WEBHOOK_URL != '' }}
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          DISCORD_BETA_WEBHOOK_URL: ${{ secrets.DISCORD_BETA_WEBHOOK_URL }}
           VERSION: ${{ steps.version.outputs.version }}
           PLUGIN_NAME: "Hardwave Analyser"
         run: |
           set -eu
+          # Release announcements (founder's rule, 2026-09-15): a clean tag gets its
+          # version post on the changelog webhook; a release candidate (any "-"
+          # suffix) notifies beta testers only, and founders are beta testers.
+          # An RC never posts on the public webhook: without a beta webhook
+          # secret it is skipped.
+          case "$VERSION" in
+            *-*)
+              HOOK="${DISCORD_BETA_WEBHOOK_URL:-}"
+              if [ -z "$HOOK" ]; then
+                echo "Release candidate ${VERSION}: no DISCORD_BETA_WEBHOOK_URL secret, not posting"
+                exit 0
+              fi
+              ;;
+            *)
+              HOOK="$DISCORD_WEBHOOK_URL"
+              ;;
+          esac
           # Read bullets from CHANGELOG.md, scoped to the matching `## <VERSION>`
           # section. Each section ends at the next `## v` header or EOF.
           # Bullets are lines starting with `- ` or `* ` at the top level of
@@ -299,6 +317,6 @@ jobs:
 
           curl -fsS -H "Content-Type: application/json" \
             -d "$PAYLOAD" \
-            "$DISCORD_WEBHOOK_URL" >/dev/null
+            "$HOOK" >/dev/null
           echo "Discord changelog posted for ${VERSION}"
 
