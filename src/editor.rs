@@ -283,6 +283,25 @@ pub struct HardwaveAnalyserEditor {
     /// Shared with the Plugin struct via Arc so nih-plug's DAW save/load
     /// lifecycle keeps preset_state in sync automatically.
     params: Arc<HardwaveAnalyserParams>,
+    /// The WebView2 pre-warm thread, kept so it can be joined.
+    ///
+    /// Detaching it is what made the CLAP validator crash this plug-in on
+    /// Windows with 0xc0000005 in a different test every run: the editor is
+    /// built for every instance, a host that creates and drops instances
+    /// quickly unloads the DLL while the thread is still inside reg.exe, and
+    /// the thread then returns into code that no longer exists. Linux and
+    /// macOS never saw it because the thread only exists on Windows.
+    #[cfg(target_os = "windows")]
+    webview2_probe: Mutex<Option<thread::JoinHandle<()>>>,
+}
+
+impl Drop for HardwaveAnalyserEditor {
+    fn drop(&mut self) {
+        #[cfg(target_os = "windows")]
+        if let Some(handle) = self.webview2_probe.lock().take() {
+            let _ = handle.join();
+        }
+    }
 }
 
 /// Generate an identifier guaranteed unique within this process.
@@ -306,16 +325,15 @@ impl HardwaveAnalyserEditor {
     ) -> Self {
         let token = auth::load_token();
 
-        // Pre-warm WebView2 check and clean up legacy session dirs in the background
-        // so neither blocks the DAW's UI thread when the user opens the plugin window.
+        // Pre-warm the WebView2 check in the background so it does not block the DAW's UI
+        // thread when the user opens the plugin window. The handle is kept and joined in
+        // Drop; a detached thread outlives the plug-in and crashes the host.
         #[cfg(target_os = "windows")]
-        {
-            std::thread::spawn(|| {
-                // Run the WebView2 reg check once so WEBVIEW2_ENSURED is already
-                // set by the time spawn() is called — avoids ~5 s reg.exe delay.
-                ensure_webview2();
-            });
-        }
+        let webview2_probe = Mutex::new(Some(thread::spawn(|| {
+            // Run the WebView2 reg check once so WEBVIEW2_ENSURED is already
+            // set by the time spawn() is called — avoids ~5 s reg.exe delay.
+            ensure_webview2();
+        })));
 
         Self {
             packet_slot,
@@ -326,6 +344,8 @@ impl HardwaveAnalyserEditor {
             resize_tx: Arc::new(Mutex::new(None)),
             instance_id: unique_instance_id(),
             params,
+            #[cfg(target_os = "windows")]
+            webview2_probe,
         }
     }
 
