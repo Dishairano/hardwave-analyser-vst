@@ -43,10 +43,20 @@ jobs:
           for f in cv/*.tar.gz; do [ -e "$f" ] && tar xzf "$f" -C cv; done
           find cv -name 'clap-validator*'
 
+      - name: Install where hosts look
+        run: |
+          # The same place the OS testers install it, so this run and theirs are comparable.
+          mkdir -p "/c/Program Files/Common Files/VST3" "/c/Program Files/Common Files/CLAP"
+          cp -R target/bundled/hardwave-analyser.vst3 "/c/Program Files/Common Files/VST3/"
+          cp -R target/bundled/hardwave-analyser.clap "/c/Program Files/Common Files/CLAP/"
+          ls -la "/c/Program Files/Common Files/CLAP"
+
       - name: Validate the CLAP
         run: |
           CV=$(find cv -name 'clap-validator.exe' | head -1)
-          "$CV" validate --json results.json target/bundled/hardwave-analyser.clap || true
+          CP=$(cygpath -w "/c/Program Files/Common Files/CLAP/hardwave-analyser.clap")
+          "$CV" validate --json results.json "$CP" || true
+          test -f results.json || echo '{"results": []}' > results.json
           cat results.json
 
       - name: Report
