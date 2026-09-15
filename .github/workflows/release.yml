@@ -262,6 +262,8 @@ jobs:
                 echo "Release candidate ${VERSION}: no DISCORD_BETA_WEBHOOK_URL secret, not posting"
                 exit 0
               fi
+              # A release candidate pings the Beta-tester role (founders are beta testers).
+              BETA_MENTION="<@&1472011152887119873> New release candidate to test: ${PLUGIN_NAME} ${VERSION}. Switch the Hardwave Suite to the Beta channel to get it."
               ;;
             *)
               HOOK="$DISCORD_WEBHOOK_URL"
@@ -315,6 +317,10 @@ jobs:
               }]
             }')
 
+          if [ -n "${BETA_MENTION:-}" ]; then
+            PAYLOAD=$(printf '%s' "$PAYLOAD" | jq --arg c "$BETA_MENTION" \
+              '. + {content: $c, allowed_mentions: {parse: [], roles: ["1472011152887119873"]}}')
+          fi
           curl -fsS -H "Content-Type: application/json" \
             -d "$PAYLOAD" \
             "$HOOK" >/dev/null
