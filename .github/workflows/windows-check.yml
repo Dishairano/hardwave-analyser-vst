@@ -55,8 +55,9 @@ jobs:
         run: |
           CV=$(find cv -name 'clap-validator.exe' | head -1)
           CP=$(cygpath -w "/c/Program Files/Common Files/CLAP/hardwave-analyser.clap")
-          "$CV" validate --json results.json "$CP" || true
-          test -f results.json || echo '{"results": []}' > results.json
+          # --json is a flag, not a file argument: the report goes to stdout.
+          "$CV" validate --json "$CP" > results.json || true
+          test -s results.json || echo '{"results": []}' > results.json
           cat results.json
 
       - name: Report
