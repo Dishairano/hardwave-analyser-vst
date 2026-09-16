@@ -40,35 +40,33 @@ jobs:
           path: target/bundled/hardwave-analyser-linux-x64.tar.gz
 
   build-windows:
-    runs-on: [self-hosted, linux, x64]
+    # A real Windows runner, like every other Hardwave plug-in uses.
+    #
+    # This job cross-compiled with cargo-xwin on a Linux runner until 2026-09-16. Measured on one
+    # machine, same commit, same validator: the cross-compiled build crashed three of the validator
+    # tests, the natively built one crashed none, and the crashes moved to different tests between
+    # runs of the same binary, which is memory corruption rather than a bug in our code. That is
+    # what the OS testers were reporting as "Analyser is red on Windows" for weeks.
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Rust + Windows MSVC target
+      - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
 
-      - name: Install cargo-xwin
-        run: cargo install cargo-xwin --locked
-
-      - name: Build (MSVC cross-compile, with GUI)
-        run: cargo xwin build --release --target x86_64-pc-windows-msvc -p hardwave-analyser
-
-      - name: Bundle VST3 and CLAP
-        run: |
-          DLL=target/x86_64-pc-windows-msvc/release/hardwave_analyser.dll
-          # VST3 bundle
-          mkdir -p target/bundled/hardwave-analyser.vst3/Contents/x86_64-win
-          cp "$DLL" target/bundled/hardwave-analyser.vst3/Contents/x86_64-win/hardwave-analyser.vst3
-          # CLAP bundle
-          cp "$DLL" target/bundled/hardwave-analyser.clap
+      - name: Build
+        run: cargo xtask bundle hardwave-analyser --release
 
       - name: Package
         run: |
           cd target/bundled
-          zip -r hardwave-analyser-windows-x64.zip hardwave-analyser.vst3 hardwave-analyser.clap
+          7z a -tzip hardwave-analyser-windows-x64.zip hardwave-analyser.vst3 hardwave-analyser.clap
 
       - name: Upload
         uses: actions/upload-artifact@v4
