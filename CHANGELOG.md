@@ -1,5 +1,11 @@
 # Hardwave Analyser — Changelog
 
+## v1.0.21 — Settings reach the host, damaged projects stay safe (2026-09-16)
+
+- Reopening a project restored the Analyser's settings, but the plug-in never told the host to re-read them, so the DAW could keep showing and automating stale values. It now asks for a rescan straight after loading.
+- A corrupt or foreign saved state made the plug-in ask for an impossible amount of memory, and the failed request took the whole host down. It now refuses the state and carries on.
+- Crash reports from our own test runs no longer reach the crash dashboard.
+
 ## v1.0.20 — Preset persistence everywhere + true peak (2026-07-07)
 
 - Preset state, custom layouts and themes now survive DAW reloads on macOS and Linux too — previously this only worked on Windows.
