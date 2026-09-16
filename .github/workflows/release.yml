@@ -278,10 +278,14 @@ jobs:
           # a warning so the next contributor knows to fix the source.
           BULLETS=""
           if [ -f CHANGELOG.md ]; then
+            # Sections (New features, Bug fixes, Improvements) come through as bold lines, and
+            # bullets as bullets, whether they are written with -, * or the bullet character.
             BULLETS=$(awk -v v="$VERSION" '
               $0 ~ "^## " v "( |$)" { in_section=1; next }
               in_section && /^## v/ { exit }
-              in_section && /^[*-] / { sub(/^[*-] /, ""); print }
+              in_section && /^[*-] / { sub(/^[*-] +/, ""); print "- " $0; next }
+              in_section && /^\xe2\x80\xa2 / { sub(/^\xe2\x80\xa2 +/, ""); print "- " $0; next }
+              in_section && /^(New features|Bug fixes|Improvements)[[:space:]]*$/ { print "**" $0 "**"; next }
             ' CHANGELOG.md)
           else
             echo "WARNING: CHANGELOG.md missing — Discord post will fall back to placeholder" >&2
