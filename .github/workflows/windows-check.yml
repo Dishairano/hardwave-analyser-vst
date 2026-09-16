@@ -51,6 +51,31 @@ jobs:
           cp -R target/bundled/hardwave-analyser.clap "/c/Program Files/Common Files/CLAP/"
           ls -la "/c/Program Files/Common Files/CLAP"
 
+      # The question this run answers: is the Windows crash in our code, or in how Windows builds
+      # of the Analyser are made? Release builds cross-compile with cargo-xwin on a Linux runner,
+      # every other plug-in builds on windows-latest. So validate both on the same machine.
+      - name: Also fetch the shipped release, built by cargo-xwin
+        run: |
+          gh release download v1.0.21 -R Dishairano/hardwave-analyser-vst -p '*windows*' -D shipped
+          7z x -y shipped/*.zip -oshipped >/dev/null
+          find shipped -name '*.clap'
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Validate the shipped build
+        run: |
+          CV=$(find cv -name 'clap-validator.exe' | head -1)
+          SHIPPED=$(cygpath -w "$(find shipped -name '*.clap' | head -1)")
+          "$CV" validate --json "$SHIPPED" > shipped.json || true
+          python - <<'PY'
+          import json
+          rows = json.load(open("shipped.json")).get("results", [])
+          bad = [r for r in rows if r["status"]["code"] in ("failed", "crashed")]
+          print(f"SHIPPED (cargo-xwin): {len(rows)} tests, {len(bad)} not ok")
+          for r in bad:
+              print("   ", r["status"]["code"], r["test"]["plugin-instance"]["test"])
+          PY
+
       - name: Validate the CLAP
         run: |
           CV=$(find cv -name 'clap-validator.exe' | head -1)
