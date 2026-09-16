@@ -1,11 +1,16 @@
 # Hardwave Analyser — Changelog
 
+## v1.0.23
+
+Bug fixes
+• the plug-in no longer crashes your DAW on Windows when tracks are added and removed quickly: it started a background check for the WebView2 runtime and never waited for it, so the check could still be running after the plug-in had been unloaded
+• typing a value into Refresh Rate, FFT size or Window works, instead of the plug-in refusing its own reading
+• typing a value into any other control works too, and what you type no longer drifts in the last decimal
+
 ## v1.0.22
 
 Bug fixes
-• the Windows version is built on Windows again, so it stops crashing hosts during playback and when loading a project: it was cross-compiled from Linux and that build was quietly corrupt
-• typing a value into Refresh Rate, FFT size or Window works, instead of the plug-in refusing its own reading
-• typing a value into any other control works too, and what you type no longer drifts in the last decimal
+• the Windows version is built on Windows instead of being cross-compiled from Linux
 • a damaged project no longer takes your DAW down with it when the plug-in loads its settings
 • your settings reach the host when a project opens, so the DAW stops showing and automating the values you had before
 
