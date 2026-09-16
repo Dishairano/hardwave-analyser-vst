@@ -56,7 +56,7 @@ jobs:
       # every other plug-in builds on windows-latest. So validate both on the same machine.
       - name: Also fetch the shipped release, built by cargo-xwin
         run: |
-          gh release download v1.0.21 -R Dishairano/hardwave-analyser-vst -p '*windows*' -D shipped
+          gh release download v1.0.22 -R Dishairano/hardwave-analyser-vst -p '*windows*' -D shipped
           7z x -y shipped/*.zip -oshipped >/dev/null
           find shipped -name '*.clap'
         env:
