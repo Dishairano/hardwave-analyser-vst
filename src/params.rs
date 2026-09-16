@@ -44,7 +44,11 @@ impl Default for HardwaveAnalyserParams {
             )
             .with_unit(" ")
             .with_value_to_string(Arc::new(|value| format!("{}", value)))
-            .with_string_to_value(Arc::new(|string: &str| string.parse().ok())),
+            // The host hands the text back with the unit on it, so a bare parse() refuses its own
+            // display: '60 Hz' came back as unsupported. parse_displayed_number reads the number.
+            .with_string_to_value(Arc::new(|string: &str| {
+                parse_displayed_number(string).map(|v| v.round() as i32)
+            })),
             refresh_rate: IntParam::new(
                 "Refresh Rate",
                 144,
@@ -52,7 +56,11 @@ impl Default for HardwaveAnalyserParams {
             )
             .with_unit(" Hz")
             .with_value_to_string(Arc::new(|value| format!("{}", value)))
-            .with_string_to_value(Arc::new(|string: &str| string.parse().ok())),
+            // The host hands the text back with the unit on it, so a bare parse() refuses its own
+            // display: '60 Hz' came back as unsupported. parse_displayed_number reads the number.
+            .with_string_to_value(Arc::new(|string: &str| {
+                parse_displayed_number(string).map(|v| v.round() as i32)
+            })),
             window_fn: IntParam::new(
                 "Window",
                 0,
@@ -68,11 +76,12 @@ impl Default for HardwaveAnalyserParams {
                 }
             }))
             .with_string_to_value(Arc::new(|string: &str| {
-                match string.to_lowercase().as_str() {
+                match string.trim().to_lowercase().as_str() {
                     "hann" => Some(0),
                     "blackman-harris" | "blackman" => Some(1),
                     "kaiser" => Some(2),
-                    _ => None,
+                    // A host may also hand back the index it was given rather than the name.
+                    other => parse_displayed_number(other).map(|v| v.round().clamp(0.0, 2.0) as i32),
                 }
             })),
             preset_state: RwLock::new(None),
