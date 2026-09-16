@@ -976,7 +976,7 @@ dependencies = [
 
 [[package]]
 name = "hardwave-analyser"
-version = "1.0.20"
+version = "1.0.21-rc1"
 dependencies = [
  "atomic_float 1.1.0",
  "base64",

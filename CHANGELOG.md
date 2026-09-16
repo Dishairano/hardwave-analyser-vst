@@ -1,5 +1,10 @@
 # Hardwave Analyser — Changelog
 
+## v1.0.21-rc1 — Release candidate (2026-09-16)
+
+- Release: RC posts ping beta testers
+- Release: route the Discord post by tag, RCs to beta testers only
+
 ## v1.0.20 — Preset persistence everywhere + true peak (2026-07-07)
 
 - Preset state, custom layouts and themes now survive DAW reloads on macOS and Linux too — previously this only worked on Windows.
