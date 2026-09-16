@@ -65,7 +65,11 @@ jobs:
       - name: Validate the shipped build
         run: |
           CV=$(find cv -name 'clap-validator.exe' | head -1)
-          SHIPPED=$(cygpath -w "$(find shipped -name '*.clap' | head -1)")
+          # From the same folder the fresh build is validated in, so the only difference left
+          # between the two runs is the file itself.
+          mkdir -p "/c/Program Files/Common Files/CLAP"
+          cp "$(find shipped -name '*.clap' | head -1)" "/c/Program Files/Common Files/CLAP/shipped-analyser.clap"
+          SHIPPED=$(cygpath -w "/c/Program Files/Common Files/CLAP/shipped-analyser.clap")
           "$CV" validate --json "$SHIPPED" > shipped.json || true
           python - <<'PY'
           import json
@@ -84,6 +88,24 @@ jobs:
           "$CV" validate --json "$CP" > results.json || true
           test -s results.json || echo '{"results": []}' > results.json
           cat results.json
+
+      - name: Build the released tag's source and validate that
+        run: |
+          git worktree add ../tagged v1.0.22 2>/dev/null || git clone --depth 1 --branch v1.0.22 \
+            https://github.com/Dishairano/hardwave-analyser-vst.git ../tagged
+          cd ../tagged
+          cargo build --release -p hardwave-analyser
+          CVEXE=$(cygpath -w "$(find "$GITHUB_WORKSPACE/cv" -name 'clap-validator.exe' | head -1)")
+          cp target/release/hardwave_analyser.dll "/c/Program Files/Common Files/CLAP/tagged-analyser.clap"
+          "$CVEXE" validate --json "$(cygpath -w '/c/Program Files/Common Files/CLAP/tagged-analyser.clap')" > tagged.json || true
+          python - <<'PY'
+          import json
+          rows = json.load(open("tagged.json")).get("results", [])
+          bad = [r for r in rows if r["status"]["code"] in ("failed", "crashed")]
+          print(f"TAGGED SOURCE REBUILT: {len(rows)} tests, {len(bad)} not ok")
+          for r in bad:
+              print("   ", r["status"]["code"], r["test"]["plugin-instance"]["test"])
+          PY
 
       - name: Report
         run: |
