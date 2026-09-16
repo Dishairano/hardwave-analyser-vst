@@ -295,11 +295,19 @@ jobs:
             BULLETS="Stability and maintenance updates"
           fi
 
+          # The reader already produced finished lines: "- text" for bullets, "**Section**" for
+          # a heading. Prefixing those again gave "Bug fixes." as a bullet and a dash inside
+          # every dot in the embed.
           DESC_BODY=$(printf '%s\n' "$BULLETS" \
-            | sed -e '/^[[:space:]]*$/d' \
-                  -e 's/[[:space:]]*\.$//' \
-                  -e 's/^/- /' \
-                  -e 's/$/./')
+            | sed -e '/^[[:space:]]*$/d' -e 's/[[:space:]]*$//' \
+            | awk '
+                /^\*\*/ { print; next }
+                { line = $0
+                  sub(/^[-*][[:space:]]*/, "", line)
+                  sub(/[[:space:]]*\.$/, "", line)
+                  print "- " line "."
+                }
+              ')
 
           DESCRIPTION=$(printf "**What's new**\n%s\n\nInstall or update via the **Hardwave Suite**." "$DESC_BODY")
           PUB_DATE=$(date -u +"%-d %b %Y")
