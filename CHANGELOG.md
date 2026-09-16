@@ -1,5 +1,11 @@
 # Hardwave Analyser — Changelog
 
+## v1.0.22 — Windows builds rebuilt on Windows (2026-09-16)
+
+- The Windows version is now built on Windows. Until this release it was cross-compiled from Linux, and that build was quietly corrupt: on the same machine, with the same code, the cross-compiled plug-in crashed the validator's audio and state tests while the native one passed every test, and the crashes moved around between runs. Nobody reported it, but it was real. Please update.
+- Typing a value into Refresh Rate, FFT size or Window works again. The plug-in refused its own display, so "60 Hz" was rejected.
+- Typing into any other control works too, and a value you type no longer drifts in the last decimal.
+
 ## v1.0.21 — Settings reach the host, damaged projects stay safe (2026-09-16)
 
 - Reopening a project restored the Analyser's settings, but the plug-in never told the host to re-read them, so the DAW could keep showing and automating stale values. It now asks for a rescan straight after loading.
