@@ -1,5 +1,9 @@
 # Hardwave Analyser — Changelog
 
+## v1.0.24-rc1
+
+- Stop bulleting what is already a bullet in the Discord post
+
 ## v1.0.23
 
 Bug fixes
