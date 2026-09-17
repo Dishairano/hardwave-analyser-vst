@@ -40,3 +40,37 @@ jobs:
         run: |
           cargo install cargo-audit --locked
           cargo audit
+
+  # Linux never compiles the macOS and Windows arms of the editor, so a break
+  # inside one of them passes every check here and only shows up when a release
+  # tag builds all four targets. LoudLab shipped that way on 2026-09-17: three
+  # of four release runners died on `error[E0433]: cannot find type HandleError
+  # in this scope`, code that had been broken for weeks. This job compiles the
+  # other two platforms on every push, which is cheap (public repo, no bundle,
+  # no tests) next to a release that cannot build.
+  cross-platform:
+    name: Compiles on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-check-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-check-
+
+      - name: Check
+        run: cargo check --release --all-targets
