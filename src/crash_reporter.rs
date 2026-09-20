@@ -70,7 +70,31 @@ pub fn install(plugin_slug: &'static str) {
     });
 }
 
+/// A panic in `cargo test`, `cargo run` or the CLAP validator is our own, not a user's crash.
+///
+/// Six of the crash reports on record are panics from `tests/state_round_trip.rs` and friends, which
+/// made the crash list read as if a released build were falling over in the field.
+///
+/// In the field a plug-in is loaded by a DAW, so the running executable is the DAW, somewhere under
+/// Program Files or /Applications. Our own runs are cargo output: a test harness always sits in a
+/// `deps/` directory, and a local build sits in `debug/` or `release/`. The target directory is not
+/// always inside the crate (this workspace builds into a shared one), so the check is on those
+/// directory names, not on `target/`.
+fn is_our_own_build() -> bool {
+    match std::env::current_exe() {
+        Ok(p) => {
+            let s = p.to_string_lossy().replace('\\', "/");
+            s.contains("/deps/") || s.contains("/debug/") || s.contains("/release/")
+        }
+        Err(_) => false,
+    }
+}
+
 fn send_crash(plugin_slug: &str, message: &str, top_frame: &str, stack: &str) {
+    if is_our_own_build() {
+        eprintln!("[{plugin_slug}] panic in our own build, not reported: {message}");
+        return;
+    }
     let machine_id = load_or_create_machine_id();
     let stack_hash = compute_stack_hash(plugin_slug, top_frame);
 
@@ -204,4 +228,17 @@ fn fill_random(buf: &mut [u8]) -> std::io::Result<()> {
 #[cfg(not(any(unix, windows)))]
 fn fill_random(_buf: &mut [u8]) -> std::io::Result<()> {
     Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "no rng available on this platform"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The whole point of the guard: whatever runs the tests is our own build, so a panic here
+    /// must never reach the crash list. If this ever fails, cargo's layout changed and the guard
+    /// needs to change with it, or every test panic starts being reported as a user crash again.
+    #[test]
+    fn test_runs_are_recognised_as_our_own() {
+        assert!(is_our_own_build(), "the test harness must count as our own build");
+    }
 }
