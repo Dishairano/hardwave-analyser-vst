@@ -336,3 +336,67 @@ jobs:
             "$HOOK" >/dev/null
           echo "Discord changelog posted for ${VERSION}"
 
+  publish-beta:
+    needs: [release]
+    # Release candidates only. A stable tag reaches everyone through the catalogue;
+    # in the beta channel it would only show up as a "beta" of the stable build.
+    if: contains(github.ref_name, '-') || contains(github.event.inputs.version, '-')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Publish to Suite beta manifest
+        env:
+          INTERNAL_SECRET: ${{ secrets.HW_INTERNAL_API_SECRET }}
+        run: |
+          set -euo pipefail
+          if [ -z "${INTERNAL_SECRET}" ]; then
+            # A finished release should not fail over this; say plainly what is missing.
+            echo "::warning::HW_INTERNAL_API_SECRET is not set on this repo, so this build was NOT published to the Suite beta channel."
+            exit 0
+          fi
+          VERSION="${{ steps.version.outputs.version }}"
+          BASE="https://github.com/${{ github.repository }}/releases/download/${VERSION}"
+
+          # One build per platform. The release job just uploaded these; fetch each to hash it.
+          ARTEFACTS='[]'
+          for PAIR in windows:hardwave-analyser-windows-x64.zip macos:hardwave-analyser-macos-universal.zip linux:hardwave-analyser-linux-x64.tar.gz; do
+            PLATFORM="${PAIR%%:*}"
+            FILE="${PAIR#*:}"
+            if ! curl -sfL --retry 5 --retry-delay 10 --retry-all-errors -o "$FILE" "$BASE/$FILE"; then
+              echo "::warning::$FILE is not on the release, so $PLATFORM testers get no beta build."
+              continue
+            fi
+            ARTEFACTS=$(jq -c --arg p "$PLATFORM" --arg u "$BASE/$FILE" \
+              --arg s "$(sha256sum "$FILE" | cut -d' ' -f1)" --argjson z "$(stat -c%s "$FILE")" \
+              '. + [{platform:$p, url:$u, sha256:$s, size:$z}]' <<<"$ARTEFACTS")
+            rm -f "$FILE"
+          done
+          if [ "$(jq length <<<"$ARTEFACTS")" -eq 0 ]; then
+            echo "No release artefacts found to publish" >&2
+            exit 1
+          fi
+          # The single artefact fields are for Suite 0.22.17 and older: the Windows build.
+          PRIMARY=$(jq -c '(map(select(.platform == "windows")) + .)[0]' <<<"$ARTEFACTS")
+
+          # The tag has a leading "v"; the catalogue and the Suite registry do not.
+          BODY=$(jq -n --arg v "$VERSION" --argjson a "$ARTEFACTS" --argjson w "$PRIMARY" \
+            '{plugin_slug:"analyser", version:($v | ltrimstr("v")), artefacts:$a, artefact_url:$w.url, artefact_sha256:$w.sha256, artefact_size:$w.size, changelog:("See the release notes for " + $v + ".")}')
+          HTTP=$(curl -s -o resp.json -w "%{http_code}" -X POST \
+            -H "Content-Type: application/json" \
+            -H "x-internal-secret: ${INTERNAL_SECRET}" \
+            -d "$BODY" \
+            https://hardwavestudios.com/api/beta/publish)
+          cat resp.json
+          # 409 = already published (an idempotent re-run), which is fine.
+          if [ "$HTTP" != "200" ] && [ "$HTTP" != "409" ]; then
+            echo "beta publish failed with HTTP $HTTP" >&2
+            exit 1
+          fi
