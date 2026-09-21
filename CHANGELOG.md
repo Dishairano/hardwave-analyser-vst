@@ -1,5 +1,11 @@
 # Hardwave Analyser — Changelog
 
+## v1.0.24-rc1
+
+Bug fixes
+• the plug-in no longer takes your DAW down when the host unloads it and loads it again, which is what MPC desktop does every time you close and reopen the window: the editor's window template outlived the plug-in and still pointed at code that had been unloaded. Reported with a crash dump by a producer running MPC, and fixed in every Hardwave plug-in
+• panics from our own test suite are no longer sent as if they were crashes on your machine
+
 ## v1.0.23
 
 Bug fixes
