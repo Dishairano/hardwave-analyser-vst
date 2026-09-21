@@ -75,3 +75,8 @@ jobs:
 
       - name: Check
         run: cargo check --release --all-targets
+
+      # The Linux job runs the tests; these platforms only compiled them. A test that can only run
+      # on Windows, like the one holding the module pin in place, was therefore never run anywhere.
+      - name: Run tests
+        run: cargo test --release
