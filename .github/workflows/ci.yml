@@ -2,10 +2,11 @@ name: CI
 
 on:
   pull_request:
+  # Pushes to the default branch build too. They used to be ignored here, so a change that went
+  # straight to main or master was never compiled by CI at all, and a break on macOS or Windows
+  # could sit in the default branch until somebody happened to open a pull request. That is how
+  # LoudLab stopped compiling for macOS and Windows for weeks.
   push:
-    branches-ignore:
-      - main
-      - master
 
 jobs:
   build:
