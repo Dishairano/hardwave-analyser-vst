@@ -498,12 +498,58 @@ fn start_packet_server(
 
 // ---------------------------------------------------------------------------
 
+/// Keep this plug-in's own module loaded for the life of the host process (Windows only).
+///
+/// Reported from the field by a producer running MPC 3 and MPC 2 desktop, with a crash dump: the
+/// host loads the plug-in, unloads it, and loads it again. The webview we build for the editor
+/// registers a Win32 window class from inside this module, and a window class outlives the module
+/// that registered it. On the second load `CreateWindowExW` reuses that class, whose `lpfnWndProc`
+/// still points into the first, now freed, copy of the module, and the first message the window
+/// receives jumps into unmapped memory. His dump showed exactly that: two load instances at
+/// different base addresses, and the faulting jump through the older one, `!Unloaded`.
+///
+/// `GET_MODULE_HANDLE_EX_FLAG_PIN` adds a reference the loader never releases, so the module stays
+/// mapped and those function pointers stay valid however many times the host loads it.
+#[cfg(target_os = "windows")]
+fn pin_own_module() {
+    use std::sync::Once;
+    static PIN: Once = Once::new();
+
+    const GET_MODULE_HANDLE_EX_FLAG_PIN: u32 = 0x0000_0001;
+    const GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS: u32 = 0x0000_0004;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetModuleHandleExW(flags: u32, module_name: *const u16, module: *mut isize) -> i32;
+    }
+
+    PIN.call_once(|| {
+        let addr = pin_own_module as *const () as *const u16;
+        let mut handle: isize = 0;
+        let ok = unsafe {
+            GetModuleHandleExW(
+                GET_MODULE_HANDLE_EX_FLAG_PIN | GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+                addr,
+                &mut handle,
+            )
+        };
+        if ok == 0 {
+            eprintln!("[HardwaveAnalyser] could not pin the module; a reload may crash the host");
+        } else {
+            eprintln!("[HardwaveAnalyser] module pinned for the life of the process");
+        }
+    });
+}
+
 impl Editor for HardwaveAnalyserEditor {
     fn spawn(
         &self,
         parent: ParentWindowHandle,
         context: Arc<dyn GuiContext>,
     ) -> Box<dyn std::any::Any + Send> {
+        #[cfg(target_os = "windows")]
+        pin_own_module();
+
         let packet_slot = Arc::clone(&self.packet_slot);
         let running = Arc::new(AtomicBool::new(true));
         let auth_token = Arc::clone(&self.auth_token);
