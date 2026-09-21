@@ -533,9 +533,10 @@ fn start_packet_server(
 /// `GET_MODULE_HANDLE_EX_FLAG_PIN` adds a reference the loader never releases, so the module stays
 /// mapped and those function pointers stay valid however many times the host loads it.
 #[cfg(target_os = "windows")]
-fn pin_own_module() {
+fn pin_own_module() -> bool {
     use std::sync::Once;
     static PIN: Once = Once::new();
+    static PINNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
     const GET_MODULE_HANDLE_EX_FLAG_PIN: u32 = 0x0000_0001;
     const GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS: u32 = 0x0000_0004;
@@ -555,12 +556,14 @@ fn pin_own_module() {
                 &mut handle,
             )
         };
+        PINNED.store(ok != 0, std::sync::atomic::Ordering::Relaxed);
         if ok == 0 {
             eprintln!("[HardwaveAnalyser] could not pin the module; a reload may crash the host");
         } else {
             eprintln!("[HardwaveAnalyser] module pinned for the life of the process");
         }
     });
+    PINNED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 impl Editor for HardwaveAnalyserEditor {
@@ -1040,5 +1043,26 @@ impl Drop for EditorHandle {
         if let Some(h) = self._thread.take() {
             let _ = h.join();
         }
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod pin_tests {
+    use super::*;
+
+    /// The crash this guards against only happens on the second load of the module, which no test
+    /// here can stage. What a test can hold in place is that the guard is still asked for and that
+    /// the loader accepts it: if `GetModuleHandleExW` ever starts refusing, this fails instead of a
+    /// producer's DAW failing.
+    #[test]
+    fn pin_is_wired() {
+        assert!(
+            pin_own_module(),
+            "the module must pin itself before any window is created"
+        );
+        assert!(
+            pin_own_module(),
+            "asking twice must stay true, it is a one-time pin"
+        );
     }
 }
