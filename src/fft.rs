@@ -174,8 +174,7 @@ impl FftProcessor {
 
             // Apply window and copy to FFT buffer
             for i in 0..FFT_SIZE {
-                self.fft_buffer[i] =
-                    Complex::new(samples[start + i] * self.window[i], 0.0);
+                self.fft_buffer[i] = Complex::new(samples[start + i] * self.window[i], 0.0);
             }
 
             self.fft

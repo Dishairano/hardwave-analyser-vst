@@ -129,7 +129,6 @@ impl AudioPacket {
     pub fn to_bytes(&self) -> Vec<u8> {
         bincode::serialize(self).unwrap_or_default()
     }
-
 }
 
 #[cfg(test)]
@@ -201,7 +200,8 @@ mod tests {
             -0.4,
         );
         let bytes = packet.to_bytes();
-        let old: OldPacket = bincode::deserialize(&bytes).expect("old struct must tolerate appended fields");
+        let old: OldPacket =
+            bincode::deserialize(&bytes).expect("old struct must tolerate appended fields");
         assert_eq!(old.packet_type, PACKET_TYPE_FFT);
         assert_eq!(old.timestamp_ms, 7);
         assert_eq!(old.right_wave.len(), WAVE_SIZE);
@@ -226,7 +226,11 @@ mod tests {
 
         let bytes = packet.to_bytes();
         // 4096 bins × 2 channels × 4 bytes + 512 wave × 2 channels × 4 bytes + overhead ≈ 37 KB
-        assert!(bytes.len() < 42_000, "Packet too large: {} bytes", bytes.len());
+        assert!(
+            bytes.len() < 42_000,
+            "Packet too large: {} bytes",
+            bytes.len()
+        );
         println!("Packet size: {} bytes", bytes.len());
     }
 }

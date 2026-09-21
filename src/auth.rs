@@ -16,10 +16,8 @@ use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 /// Ed25519 public key — generated once, private key stored in server .env only.
 /// To rotate: generate a new keypair, update this constant, redeploy server with new private key.
 const PUBLIC_KEY: [u8; 32] = [
-    0x22, 0x8b, 0xb9, 0x2b, 0x1b, 0x54, 0x81, 0x12,
-    0x3b, 0x57, 0x78, 0x3f, 0x2b, 0xc4, 0x9a, 0x94,
-    0xd5, 0xb6, 0x0b, 0xac, 0xcb, 0x0c, 0x05, 0xa6,
-    0x20, 0x58, 0xef, 0x5b, 0xc8, 0x23, 0x32, 0xef,
+    0x22, 0x8b, 0xb9, 0x2b, 0x1b, 0x54, 0x81, 0x12, 0x3b, 0x57, 0x78, 0x3f, 0x2b, 0xc4, 0x9a, 0x94,
+    0xd5, 0xb6, 0x0b, 0xac, 0xcb, 0x0c, 0x05, 0xa6, 0x20, 0x58, 0xef, 0x5b, 0xc8, 0x23, 0x32, 0xef,
 ];
 
 fn hardwave_dir() -> Option<PathBuf> {
@@ -45,7 +43,11 @@ fn debug_log(msg: &str) {
         p.push("hardwave-debug.log");
         p
     };
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -102,7 +104,11 @@ pub fn load_token() -> Option<String> {
                 debug_log(&format!("[auth] load_token: skipping older {:?}", path));
             }
             _ => {
-                debug_log(&format!("[auth] load_token: candidate {} bytes from {:?}", content.len(), path));
+                debug_log(&format!(
+                    "[auth] load_token: candidate {} bytes from {:?}",
+                    content.len(),
+                    path
+                ));
                 best = Some((content, mtime, path.clone()));
             }
         }
@@ -122,16 +128,26 @@ pub fn save_token(token: &str) {
     if let Some(path) = token_path() {
         if let Some(parent) = path.parent() {
             if let Err(e) = fs::create_dir_all(parent) {
-                debug_log(&format!("[auth] save_token: mkdir failed {:?}: {}", parent, e));
+                debug_log(&format!(
+                    "[auth] save_token: mkdir failed {:?}: {}",
+                    parent, e
+                ));
                 return;
             }
         }
         match fs::write(&path, token) {
             Ok(()) => {
-                debug_log(&format!("[auth] save_token: wrote {} bytes to {:?}", token.len(), path));
+                debug_log(&format!(
+                    "[auth] save_token: wrote {} bytes to {:?}",
+                    token.len(),
+                    path
+                ));
             }
             Err(e) => {
-                debug_log(&format!("[auth] save_token: write failed {:?}: {}", path, e));
+                debug_log(&format!(
+                    "[auth] save_token: write failed {:?}: {}",
+                    path, e
+                ));
             }
         }
         #[cfg(unix)]
@@ -208,7 +224,10 @@ pub fn load_sub_cache() -> bool {
         Ok(s) => s,
         Err(_) => return false,
     };
-    let exp: u64 = match payload_str.split_once(':').and_then(|(_, e)| e.parse().ok()) {
+    let exp: u64 = match payload_str
+        .split_once(':')
+        .and_then(|(_, e)| e.parse().ok())
+    {
         Some(t) => t,
         None => return false,
     };
@@ -254,10 +273,17 @@ pub fn load_preset_state() -> Option<String> {
     match fs::read_to_string(&path) {
         Ok(s) => {
             let trimmed = s.trim().to_string();
-            if trimmed.is_empty() { None } else { Some(trimmed) }
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
         }
         Err(e) => {
-            debug_log(&format!("[auth] load_preset_state: read failed {:?}: {}", path, e));
+            debug_log(&format!(
+                "[auth] load_preset_state: read failed {:?}: {}",
+                path, e
+            ));
             None
         }
     }
@@ -272,13 +298,23 @@ pub fn save_preset_state(json: &str) {
     };
     if let Some(parent) = path.parent() {
         if let Err(e) = fs::create_dir_all(parent) {
-            debug_log(&format!("[auth] save_preset_state: mkdir failed {:?}: {}", parent, e));
+            debug_log(&format!(
+                "[auth] save_preset_state: mkdir failed {:?}: {}",
+                parent, e
+            ));
             return;
         }
     }
     match fs::write(&path, json) {
-        Ok(()) => debug_log(&format!("[auth] save_preset_state: wrote {} bytes to {:?}", json.len(), path)),
-        Err(e) => debug_log(&format!("[auth] save_preset_state: write failed {:?}: {}", path, e)),
+        Ok(()) => debug_log(&format!(
+            "[auth] save_preset_state: wrote {} bytes to {:?}",
+            json.len(),
+            path
+        )),
+        Err(e) => debug_log(&format!(
+            "[auth] save_preset_state: write failed {:?}: {}",
+            path, e
+        )),
     }
 }
 

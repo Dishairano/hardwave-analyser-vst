@@ -1,14 +1,14 @@
 //! WebSocket client for streaming audio data to Hardwave Suite
 
 use crossbeam_channel::{bounded, Receiver, RecvTimeoutError, Sender, TryRecvError};
+use parking_lot::Mutex;
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
-use parking_lot::Mutex;
 use tungstenite::protocol::WebSocket;
-use tungstenite::{Message, client::IntoClientRequest};
+use tungstenite::{client::IntoClientRequest, Message};
 
 use crate::protocol::AudioPacket;
 
@@ -122,15 +122,17 @@ impl WebSocketClient {
         // Connect with a short timeout: this is a loopback connect, which
         // either succeeds or is refused almost instantly. 500 ms also bounds
         // the worst-case Drop::join stall if unload lands mid-connect.
-        let stream = TcpStream::connect_timeout(
-            &addr.parse().map_err(|_| ())?,
-            Duration::from_millis(500),
-        )
-        .map_err(|_| ())?;
+        let stream =
+            TcpStream::connect_timeout(&addr.parse().map_err(|_| ())?, Duration::from_millis(500))
+                .map_err(|_| ())?;
 
         stream.set_nonblocking(false).ok();
-        stream.set_read_timeout(Some(Duration::from_millis(100))).ok();
-        stream.set_write_timeout(Some(Duration::from_millis(100))).ok();
+        stream
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .ok();
+        stream
+            .set_write_timeout(Some(Duration::from_millis(100)))
+            .ok();
 
         // Use tungstenite's built-in handshake which validates Sec-WebSocket-Accept
         // per RFC 6455, preventing connections to rogue local services.

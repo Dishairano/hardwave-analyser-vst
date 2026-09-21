@@ -41,7 +41,11 @@ fn debug_log(msg: &str) {
         p.push("hardwave-debug.log");
         p
     };
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -62,7 +66,10 @@ struct Stopwatch {
 impl Stopwatch {
     fn new(label: &str) -> Self {
         let start = std::time::Instant::now();
-        Self { start, marks: vec![(label.to_string(), 0)] }
+        Self {
+            start,
+            marks: vec![(label.to_string(), 0)],
+        }
     }
 
     fn mark(&mut self, label: &str) {
@@ -83,10 +90,12 @@ impl Stopwatch {
     }
 }
 
-
-#[cfg(target_os = "windows")] const PLUGIN_OS: &str = "windows";
-#[cfg(target_os = "macos")]   const PLUGIN_OS: &str = "macos";
-#[cfg(target_os = "linux")]   const PLUGIN_OS: &str = "linux";
+#[cfg(target_os = "windows")]
+const PLUGIN_OS: &str = "windows";
+#[cfg(target_os = "macos")]
+const PLUGIN_OS: &str = "macos";
+#[cfg(target_os = "linux")]
+const PLUGIN_OS: &str = "linux";
 #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
 const PLUGIN_OS: &str = "unknown";
 
@@ -97,13 +106,14 @@ const PLUGIN_OS: &str = "unknown";
 /// Cached result of the WebView2 presence check. Spawning reg.exe is slow
 /// (~2-3 s each with AV scanning). We only need to check once per DAW session.
 #[cfg(target_os = "windows")]
-static WEBVIEW2_ENSURED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+static WEBVIEW2_ENSURED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 #[cfg(target_os = "windows")]
 pub(crate) fn ensure_webview2() {
     // Already confirmed present this session — skip the slow reg.exe checks.
-    if WEBVIEW2_ENSURED.load(Ordering::Relaxed) { return; }
+    if WEBVIEW2_ENSURED.load(Ordering::Relaxed) {
+        return;
+    }
 
     use std::process::Command;
 
@@ -126,7 +136,8 @@ pub(crate) fn ensure_webview2() {
         .args([
             "query",
             r"HKCU\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}",
-            "/v", "pv",
+            "/v",
+            "pv",
         ])
         .output()
         .map(|o| o.status.success())
@@ -190,15 +201,13 @@ impl rwh06::HasWindowHandle for RwhWrapper {
         let raw = match self.0 {
             ParentWindowHandle::X11Window(window) => {
                 let handle = rwh06::XcbWindowHandle::new(
-                    std::num::NonZeroU32::new(window)
-                        .ok_or(rwh06::HandleError::Unavailable)?,
+                    std::num::NonZeroU32::new(window).ok_or(rwh06::HandleError::Unavailable)?,
                 );
                 rwh06::RawWindowHandle::Xcb(handle)
             }
             ParentWindowHandle::AppKitNsView(ns_view) => {
                 let handle = rwh06::AppKitWindowHandle::new(
-                    std::ptr::NonNull::new(ns_view)
-                        .ok_or(rwh06::HandleError::Unavailable)?,
+                    std::ptr::NonNull::new(ns_view).ok_or(rwh06::HandleError::Unavailable)?,
                 );
                 rwh06::RawWindowHandle::AppKit(handle)
             }
@@ -361,7 +370,6 @@ impl HardwaveAnalyserEditor {
         }
         url
     }
-
 }
 
 // ---------------------------------------------------------------------------
@@ -401,7 +409,9 @@ fn start_packet_server(
                     if conn_count <= 3 || conn_count % 300 == 0 {
                         debug_log(&format!("packet server: conn #{} from JS", conn_count));
                     }
-                    stream.set_read_timeout(Some(Duration::from_millis(50))).ok();
+                    stream
+                        .set_read_timeout(Some(Duration::from_millis(50)))
+                        .ok();
                     let mut buf = vec![0u8; 65536];
                     let n = match stream.read(&mut buf) {
                         Ok(0) => continue,
@@ -422,15 +432,20 @@ fn start_packet_server(
                          Access-Control-Max-Age: 86400\r\n\
                          Content-Length: 0\r\n\
                          Connection: close\r\n\
-                         \r\n".to_string()
+                         \r\n"
+                            .to_string()
                     } else if is_post {
-                        let body_start = request.windows(4)
+                        let body_start = request
+                            .windows(4)
                             .position(|w| w == b"\r\n\r\n")
                             .map(|p| p + 4)
                             .unwrap_or(n);
                         let body = std::str::from_utf8(&request[body_start..n]).unwrap_or("");
                         if request.starts_with(b"POST /debug/") {
-                            debug_log(&format!("POST debug: {}", truncate_at_char_boundary(body, 500)));
+                            debug_log(&format!(
+                                "POST debug: {}",
+                                truncate_at_char_boundary(body, 500)
+                            ));
                         } else if !body.is_empty() && body != "null" {
                             debug_log(&format!("POST /state: {} bytes", body.len()));
                             *params.preset_state.write() = Some(body.to_string());
@@ -442,9 +457,13 @@ fn start_packet_server(
                          Access-Control-Allow-Origin: *\r\n\
                          Content-Length: 4\r\n\
                          Connection: close\r\n\
-                         \r\nnull".to_string()
+                         \r\nnull"
+                            .to_string()
                     } else {
-                        let path = std::str::from_utf8(request.split(|b| *b == b' ').nth(1).unwrap_or(b"")).unwrap_or("");
+                        let path = std::str::from_utf8(
+                            request.split(|b| *b == b' ').nth(1).unwrap_or(b""),
+                        )
+                        .unwrap_or("");
                         let body = if path == "/init" {
                             let token = auth_token.lock().clone().unwrap_or_default();
                             let sub = crate::auth::load_sub_cache();
@@ -459,7 +478,8 @@ fn start_packet_server(
                                 "token": token,
                                 "subValid": sub,
                                 "presetState": preset,
-                            })).unwrap_or_else(|_| "null".to_string())
+                            }))
+                            .unwrap_or_else(|_| "null".to_string())
                         } else {
                             // GET / — FFT packet
                             match packet_slot.lock().take() {
@@ -481,7 +501,9 @@ fn start_packet_server(
                             body
                         )
                     };
-                    stream.set_write_timeout(Some(Duration::from_millis(100))).ok();
+                    stream
+                        .set_write_timeout(Some(Duration::from_millis(100)))
+                        .ok();
                     let _ = stream.write_all(resp.as_bytes());
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -582,7 +604,10 @@ impl Editor for HardwaveAnalyserEditor {
                 ParentWindowHandle::Win32Hwnd(h) => h as usize,
                 _ => 0,
             };
-            debug_log(&format!("spawn() called, parent HWND = 0x{:X}", parent_hwnd));
+            debug_log(&format!(
+                "spawn() called, parent HWND = 0x{:X}",
+                parent_hwnd
+            ));
 
             ensure_webview2();
             sw.mark("ensure_webview2()");
@@ -662,7 +687,7 @@ impl Editor for HardwaveAnalyserEditor {
             let webview = wry::WebViewBuilder::with_web_context(&mut web_context)
                 .with_additional_browser_args(
                     "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection \
-                     --allow-insecure-localhost"
+                     --allow-insecure-localhost",
                 )
                 .with_devtools(false)
                 .with_transparent(false)
@@ -671,9 +696,9 @@ impl Editor for HardwaveAnalyserEditor {
                 .with_focused(true)
                 .with_url(&url)
                 .with_navigation_handler(|url: String| {
-                    url.starts_with("https://hardwavestudios.com/") ||
-                    url.starts_with("https://analyser.hardwavestudios.com/") ||
-                    url.starts_with("http://127.0.0.1:")
+                    url.starts_with("https://hardwavestudios.com/")
+                        || url.starts_with("https://analyser.hardwavestudios.com/")
+                        || url.starts_with("http://127.0.0.1:")
                 })
                 .with_ipc_handler({
                     let ipc_editor_size = Arc::clone(&editor_size);
@@ -703,7 +728,9 @@ impl Editor for HardwaveAnalyserEditor {
                             // JS sends "resize:{w},{h}"
                             let parts: Vec<&str> = json.split(',').collect();
                             if parts.len() == 2 {
-                                if let (Ok(w), Ok(h)) = (parts[0].parse::<u32>(), parts[1].parse::<u32>()) {
+                                if let (Ok(w), Ok(h)) =
+                                    (parts[0].parse::<u32>(), parts[1].parse::<u32>())
+                                {
                                     let w = w.clamp(MIN_WIDTH, MAX_WIDTH);
                                     let h = h.clamp(MIN_HEIGHT, MAX_HEIGHT);
                                     *ipc_editor_size.lock() = (w, h);
@@ -808,10 +835,8 @@ impl Editor for HardwaveAnalyserEditor {
                             .unwrap_or_else(|_| "undefined".to_string())
                     )
                 };
-                let sub_valid_line = format!(
-                    "window.__HARDWAVE_SUB_VALID = {};",
-                    auth::load_sub_cache()
-                );
+                let sub_valid_line =
+                    format!("window.__HARDWAVE_SUB_VALID = {};", auth::load_sub_cache());
 
                 let webview = wry::WebViewBuilder::new()
                     .with_bounds(wry::Rect {
@@ -924,7 +949,8 @@ impl Editor for HardwaveAnalyserEditor {
                                     size: wry::dpi::LogicalSize::new(
                                         (ew as f32 * scale) as u32,
                                         (eh as f32 * scale) as u32,
-                                    ).into(),
+                                    )
+                                    .into(),
                                 });
                                 last_scale_bits = current_scale_bits;
                             }

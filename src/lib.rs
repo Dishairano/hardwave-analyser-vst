@@ -5,7 +5,11 @@
 //! When built with the `gui` feature, it also embeds a wry webview that loads
 //! the Hardwave Analyser from hardwave.studio inside the DAW plugin window.
 
-#![allow(clippy::needless_range_loop, clippy::too_many_arguments, clippy::type_complexity)]
+#![allow(
+    clippy::needless_range_loop,
+    clippy::too_many_arguments,
+    clippy::type_complexity
+)]
 mod auth;
 #[cfg(feature = "gui")]
 mod editor;
@@ -103,7 +107,10 @@ fn install_crash_handler() {
                 let _ = std::fs::create_dir_all(parent);
             }
             let crash_ts = chrono_timestamp();
-            let _ = std::fs::write(&pending, format!("analyser\n{}\n{}", env!("CARGO_PKG_VERSION"), crash_ts));
+            let _ = std::fs::write(
+                &pending,
+                format!("analyser\n{}\n{}", env!("CARGO_PKG_VERSION"), crash_ts),
+            );
             // Call the previous hook so nih-plug / DAW logging still works
             prev(info);
         }));
@@ -135,7 +142,6 @@ pub struct HardwaveAnalyser {
     // Editor is constructed fresh per `editor()` call — see comment on the
     // `editor()` impl below for why the previous one-shot Option pattern was
     // a re-open bug, not an optimisation.
-
     /// FFT processor for left channel
     fft_left: FftProcessor,
 
@@ -169,7 +175,6 @@ pub struct HardwaveAnalyser {
     /// Shared interval (ms) between FFT sends, read by the editor thread for its sleep duration
     #[cfg(feature = "gui")]
     refresh_interval_ms: Arc<AtomicU32>,
-
 }
 
 impl Default for HardwaveAnalyser {
@@ -177,7 +182,8 @@ impl Default for HardwaveAnalyser {
         install_crash_handler();
         crash_reporter::install("analyser");
 
-        let packet_slot: Arc<Mutex<Option<std::sync::Arc<AudioPacket>>>> = Arc::new(Mutex::new(None));
+        let packet_slot: Arc<Mutex<Option<std::sync::Arc<AudioPacket>>>> =
+            Arc::new(Mutex::new(None));
 
         #[cfg(feature = "gui")]
         let refresh_interval_ms = Arc::new(AtomicU32::new(16)); // 1000 / 60Hz
@@ -294,8 +300,6 @@ impl Plugin for HardwaveAnalyser {
         self.samples_since_send = 0;
     }
 
-
-
     fn process(
         &mut self,
         buffer: &mut Buffer,
@@ -375,10 +379,20 @@ impl HardwaveAnalyser {
     /// Write a line to the same debug log as editor.rs
     fn debug_log(msg: &str) {
         use std::io::Write;
-        let path = { let mut p = std::env::temp_dir(); p.push("hardwave-debug.log"); p };
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let path = {
+            let mut p = std::env::temp_dir();
+            p.push("hardwave-debug.log");
+            p
+        };
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
             let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
             let _ = writeln!(f, "[{}] [lib] {}", now, msg);
         }
     }

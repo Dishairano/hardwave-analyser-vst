@@ -61,29 +61,25 @@ impl Default for HardwaveAnalyserParams {
             .with_string_to_value(Arc::new(|string: &str| {
                 parse_displayed_number(string).map(|v| v.round() as i32)
             })),
-            window_fn: IntParam::new(
-                "Window",
-                0,
-                IntRange::Linear { min: 0, max: 2 },
-            )
-            .with_unit("")
-            .with_value_to_string(Arc::new(|value| {
-                match value {
+            window_fn: IntParam::new("Window", 0, IntRange::Linear { min: 0, max: 2 })
+                .with_unit("")
+                .with_value_to_string(Arc::new(|value| match value {
                     0 => "Hann".to_string(),
                     1 => "Blackman-Harris".to_string(),
                     2 => "Kaiser".to_string(),
                     _ => "Hann".to_string(),
-                }
-            }))
-            .with_string_to_value(Arc::new(|string: &str| {
-                match string.trim().to_lowercase().as_str() {
-                    "hann" => Some(0),
-                    "blackman-harris" | "blackman" => Some(1),
-                    "kaiser" => Some(2),
-                    // A host may also hand back the index it was given rather than the name.
-                    other => parse_displayed_number(other).map(|v| v.round().clamp(0.0, 2.0) as i32),
-                }
-            })),
+                }))
+                .with_string_to_value(Arc::new(|string: &str| {
+                    match string.trim().to_lowercase().as_str() {
+                        "hann" => Some(0),
+                        "blackman-harris" | "blackman" => Some(1),
+                        "kaiser" => Some(2),
+                        // A host may also hand back the index it was given rather than the name.
+                        other => {
+                            parse_displayed_number(other).map(|v| v.round().clamp(0.0, 2.0) as i32)
+                        }
+                    }
+                })),
             preset_state: RwLock::new(None),
         }
     }
