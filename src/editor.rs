@@ -558,9 +558,9 @@ fn pin_own_module() -> bool {
         };
         PINNED.store(ok != 0, std::sync::atomic::Ordering::Relaxed);
         if ok == 0 {
-            eprintln!("[HardwaveAnalyser] could not pin the module; a reload may crash the host");
+            elog!("[HardwaveAnalyser] could not pin the module; a reload may crash the host");
         } else {
-            eprintln!("[HardwaveAnalyser] module pinned for the life of the process");
+            elog!("[HardwaveAnalyser] module pinned for the life of the process");
         }
     });
     PINNED.load(std::sync::atomic::Ordering::Relaxed)
@@ -592,10 +592,23 @@ impl WithUrlOrOffline for wry::WebViewBuilder<'_> {
 /// Anything other than a clear network failure counts as reachable: a redirect, a 403, a 500, all
 /// mean something answered, and the page itself handles those far better than a guess here would.
 /// Never called from the audio thread; `Editor::spawn` runs on the host's UI thread.
+/// Ask, before the WebView opens, whether the interface can be reached.
+///
+/// Answering "no" costs the user their whole window, so this only answers "no"
+/// when it is sure. The WebView has its own network stack: it follows the
+/// system proxy, it has its own cache, and on Windows it runs in a process the
+/// firewall may allow where it blocks the DAW. A slow or half-open network
+/// therefore says nothing about whether the page would have loaded, and a
+/// timeout here used to replace a working interface with an apology.
+///
+/// Only a refused connection or a name that does not resolve is treated as
+/// offline. Anything else, a timeout or a TLS error or a proxy that will not
+/// talk to us, loads the URL and lets the WebView try, because it may well
+/// succeed where we did not.
 fn interface_reachable(url: &str) -> bool {
     match ureq::builder()
-        .timeout_connect(std::time::Duration::from_secs(3))
-        .timeout(std::time::Duration::from_secs(5))
+        .timeout_connect(std::time::Duration::from_millis(1500))
+        .timeout(std::time::Duration::from_secs(3))
         .build()
         .head(url)
         .call()
@@ -603,11 +616,36 @@ fn interface_reachable(url: &str) -> bool {
         Ok(_) => true,
         // A status code is an answer: the server is there.
         Err(ureq::Error::Status(_, _)) => true,
-        Err(e) => {
-            eprintln!("[HardwaveAnalyser] the interface is not reachable: {}", e);
-            false
+        Err(ureq::Error::Transport(t)) => {
+            let reason = t.to_string();
+            let definite = offline_is_certain(&reason);
+            elog!(
+                "[HardwaveAnalyser] probe failed ({}): {}",
+                reason,
+                if definite {
+                    "showing the offline page"
+                } else {
+                    "loading the interface anyway, the WebView may get through"
+                }
+            );
+            !definite
         }
     }
+}
+
+/// Does this transport error mean the machine cannot get there at all?
+///
+/// A refused connection and a name that does not resolve are answers: nothing
+/// is listening, or the host does not exist for this machine. A timeout is not
+/// an answer, and neither is a TLS or proxy failure, because the WebView uses
+/// neither our sockets nor our trust store.
+fn offline_is_certain(reason: &str) -> bool {
+    let r = reason.to_ascii_lowercase();
+    r.contains("refused")
+        || r.contains("dns")
+        || r.contains("resolve")
+        || r.contains("unreachable")
+        || r.contains("no route")
 }
 
 /// What the window shows when the interface cannot be reached, instead of nothing.
@@ -651,6 +689,13 @@ impl Editor for HardwaveAnalyserEditor {
         parent: ParentWindowHandle,
         context: Arc<dyn GuiContext>,
     ) -> Box<dyn std::any::Any + Send> {
+        // First line of every run, so a log sent to support says which build
+        // and which machine wrote the lines under it.
+        elog!(
+            "[HardwaveAnalyser] ---- editor opening: v{} on {} ----",
+            env!("CARGO_PKG_VERSION"),
+            std::env::consts::OS
+        );
         #[cfg(target_os = "windows")]
         pin_own_module();
 
@@ -1171,5 +1216,31 @@ mod offline_tests {
             html.contains("support@hardwavestudios.com"),
             "say where to write when it keeps failing"
         );
+    }
+}
+
+#[cfg(test)]
+mod probe_tests {
+    use super::offline_is_certain;
+
+    #[test]
+    fn only_a_definite_failure_takes_the_interface_away() {
+        // Answers: nothing is there for this machine.
+        assert!(offline_is_certain("Connection refused (os error 111)"));
+        assert!(offline_is_certain(
+            "Dns Failed: failed to lookup address information"
+        ));
+        assert!(offline_is_certain("Network is unreachable"));
+        assert!(offline_is_certain("No route to host"));
+
+        // Not answers: the WebView may still get the page.
+        assert!(!offline_is_certain("timed out reading response"));
+        assert!(!offline_is_certain("Connection timed out"));
+        assert!(!offline_is_certain(
+            "Invalid TLS certificate: UnknownIssuer"
+        ));
+        assert!(!offline_is_certain(
+            "proxy: 407 Proxy Authentication Required"
+        ));
     }
 }

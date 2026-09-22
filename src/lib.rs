@@ -11,6 +11,8 @@
     clippy::type_complexity
 )]
 mod auth;
+#[macro_use]
+pub mod diag;
 #[cfg(feature = "gui")]
 mod editor;
 mod fft;
