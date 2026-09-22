@@ -1,5 +1,10 @@
 # Hardwave Analyser — Changelog
 
+## v1.0.25
+
+- **A window that stays empty now leaves a log we can read.** Everything the editor knew is written to a file: whether it found your licence token, which address it loaded, whether the WebView was created, whether the interface answered. All of it used to go to a console no DAW shows. It is now also appended to `%APPDATA%\hardwave\analyser-editor.log` (on macOS `~/Library/Application Support/hardwave/analyser-editor.log`). Send that file with a report and we can usually see the cause in it. It holds no audio, no project data and no licence token.
+- **A slow network no longer replaces a working interface with an apology.** Before the window opens, the plug-in asks whether the interface can be reached, and anything short of an answer counted as offline: a timeout, a proxy, a firewall that allows the browser but not the DAW. Only a refused connection or a name that does not resolve counts now. Everything else loads the interface and lets the WebView try.
+
 ## v1.0.24
 
 Bug fixes
