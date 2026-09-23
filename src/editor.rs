@@ -602,35 +602,71 @@ impl WithUrlOrOffline for wry::WebViewBuilder<'_> {
 /// timeout here used to replace a working interface with an apology.
 ///
 /// Only a refused connection or a name that does not resolve is treated as
-/// offline. Anything else, a timeout or a TLS error or a proxy that will not
-/// talk to us, loads the URL and lets the WebView try, because it may well
-/// succeed where we did not.
+/// offline. Anything else — a timeout, a TLS error, a proxy that will not talk
+/// to us — loads the URL and lets the WebView try, because it may well succeed.
 fn interface_reachable(url: &str) -> bool {
+    let (reachable, failure) = probe_interface(url);
+    if let Some(reason) = failure {
+        elog!(
+            "[HardwaveAnalyser] probe failed ({}): {}",
+            reason,
+            if reachable {
+                "loading the interface anyway, the WebView may get through"
+            } else {
+                "showing the offline page"
+            }
+        );
+    }
+    reachable
+}
+
+/// The probe itself: whether to load the interface, and why the probe failed if it did.
+///
+/// The probe asks the address without its query string. The query carries the licence token, and
+/// the probe has no use for it: it only asks whether the host answers. Before, the token went out
+/// on this extra request, and because ureq writes the full URL into its error text, it also went
+/// into `wettboi-editor.log` on every failed probe, the one file we ask users to send us.
+///
+/// The verdict is taken from ureq's error kind and the cause under it, never from the whole error
+/// text. That text starts with the URL, so a token that happened to contain "dns" or "refused"
+/// turned a timeout into a certain "offline" and took the window away from that one user.
+fn probe_interface(url: &str) -> (bool, Option<String>) {
     match ureq::builder()
         .timeout_connect(std::time::Duration::from_millis(1500))
         .timeout(std::time::Duration::from_secs(3))
         .build()
-        .head(url)
+        .head(without_query(url))
         .call()
     {
-        Ok(_) => true,
+        Ok(_) => (true, None),
         // A status code is an answer: the server is there.
-        Err(ureq::Error::Status(_, _)) => true,
+        Err(ureq::Error::Status(_, _)) => (true, None),
         Err(ureq::Error::Transport(t)) => {
-            let reason = t.to_string();
-            let definite = offline_is_certain(&reason);
-            elog!(
-                "[HardwaveAnalyser] probe failed ({}): {}",
-                reason,
-                if definite {
-                    "showing the offline page"
-                } else {
-                    "loading the interface anyway, the WebView may get through"
-                }
-            );
-            !definite
+            let reason = transport_reason(&t);
+            let definite = offline_is_certain(t.kind(), &reason);
+            (!definite, Some(reason))
         }
     }
+}
+
+/// `url` up to its query string or fragment.
+fn without_query(url: &str) -> &str {
+    url.split(['?', '#']).next().unwrap_or(url)
+}
+
+/// What went wrong, without the URL ureq puts in front of it: the kind, ureq's own message, and
+/// the error underneath, which is where the operating system says "refused" or "timed out".
+fn transport_reason(t: &ureq::Transport) -> String {
+    let mut reason = t.kind().to_string();
+    if let Some(message) = t.message() {
+        reason.push_str(": ");
+        reason.push_str(message);
+    }
+    if let Some(source) = std::error::Error::source(t) {
+        reason.push_str(": ");
+        reason.push_str(&source.to_string());
+    }
+    reason
 }
 
 /// Does this transport error mean the machine cannot get there at all?
@@ -639,13 +675,26 @@ fn interface_reachable(url: &str) -> bool {
 /// is listening, or the host does not exist for this machine. A timeout is not
 /// an answer, and neither is a TLS or proxy failure, because the WebView uses
 /// neither our sockets nor our trust store.
-fn offline_is_certain(reason: &str) -> bool {
+///
+/// `reason` is the cause from [`transport_reason`], which holds no URL. Only a failed name lookup
+/// or a failed connect can be certain; a TLS setup failure is also reported as a failed connect by
+/// ureq, which is why the cause is read as well as the kind.
+fn offline_is_certain(kind: ureq::ErrorKind, reason: &str) -> bool {
     let r = reason.to_ascii_lowercase();
-    r.contains("refused")
-        || r.contains("dns")
-        || r.contains("resolve")
-        || r.contains("unreachable")
-        || r.contains("no route")
+    // ureq reports whatever the resolver returned as a DNS failure, and our own deadline runs
+    // through the resolver too. A name server that is slow to answer therefore arrives here
+    // looking exactly like a name that does not exist. A machine that timed out may be on a
+    // network the WebView gets through, so a timeout is never a certain answer.
+    if r.contains("timed out") || r.contains("timeout") || r.contains("would block") {
+        return false;
+    }
+    match kind {
+        ureq::ErrorKind::Dns => true,
+        ureq::ErrorKind::ConnectionFailed => {
+            r.contains("refused") || r.contains("unreachable") || r.contains("no route")
+        }
+        _ => false,
+    }
 }
 
 /// What the window shows when the interface cannot be reached, instead of nothing.
@@ -1195,6 +1244,111 @@ mod pin_tests {
 mod offline_tests {
     use super::*;
 
+    #[test]
+    fn only_a_definite_failure_takes_the_interface_away() {
+        use ureq::ErrorKind::{ConnectionFailed, Dns, Io, ProxyConnect};
+
+        // Answers: nothing is there for this machine.
+        assert!(offline_is_certain(
+            ConnectionFailed,
+            "Connection Failed: Connect error: Connection refused (os error 111)"
+        ));
+        assert!(offline_is_certain(
+            Dns,
+            "Dns Failed: resolve dns name 'example.com:443': failed to lookup address information"
+        ));
+        assert!(offline_is_certain(
+            ConnectionFailed,
+            "Connection Failed: Connect error: Network is unreachable (os error 101)"
+        ));
+        assert!(offline_is_certain(
+            ConnectionFailed,
+            "Connection Failed: Connect error: No route to host (os error 113)"
+        ));
+
+        // A slow name server is not a missing name: our own deadline runs through the resolver,
+        // so a timeout arrives here wearing the DNS label.
+        assert!(!offline_is_certain(
+            Dns,
+            "Dns Failed: resolve dns name 'hardwavestudios.com:443': timed out"
+        ));
+
+        // Not answers: the WebView may still get the page.
+        assert!(!offline_is_certain(
+            Io,
+            "Network Error: timed out reading response"
+        ));
+        assert!(!offline_is_certain(
+            ConnectionFailed,
+            "Connection Failed: Connect error: Connection timed out (os error 110)"
+        ));
+        assert!(!offline_is_certain(
+            ConnectionFailed,
+            "Connection Failed: tls connection init failed: invalid peer certificate: UnknownIssuer"
+        ));
+        assert!(!offline_is_certain(
+            ProxyConnect,
+            "Proxy failed to connect: 407 Proxy Authentication Required"
+        ));
+        // Words that only mean something in a lookup or a connect mean nothing elsewhere.
+        assert!(!offline_is_certain(Io, "Network Error: dns refused"));
+    }
+
+    #[test]
+    fn the_probe_leaves_the_query_behind() {
+        assert_eq!(
+            without_query("https://example.com/vst/thing?token=abc&v=1"),
+            "https://example.com/vst/thing"
+        );
+        assert_eq!(
+            without_query("https://example.com/vst/thing#x"),
+            "https://example.com/vst/thing"
+        );
+        assert_eq!(
+            without_query("https://example.com/vst/thing"),
+            "https://example.com/vst/thing"
+        );
+    }
+
+    /// A probe that fails must not put the token in the reason that goes to the log file.
+    #[test]
+    fn a_failed_probe_does_not_log_the_token() {
+        // Bind and drop at once, so the port is almost certainly closed: a refused connect.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .and_then(|l| l.local_addr())
+            .map(|a| a.port())
+            .expect("a free local port");
+        let url = format!("http://127.0.0.1:{port}/vst/analyser?token=SECRETTOKEN&v=1");
+
+        // Whether this ends as "refused" or as a connect timeout depends on the platform (Windows
+        // retries a refused connect for longer than the probe waits), so only the reason is checked.
+        let (_, reason) = probe_interface(&url);
+        let reason = reason.expect("nothing listens there, so the probe must fail");
+        assert!(
+            !reason.contains("SECRETTOKEN"),
+            "token in the log: {reason}"
+        );
+        assert!(!reason.contains("token="), "query in the log: {reason}");
+    }
+
+    /// The verdict must not depend on what the token spells. A timeout with a token that contains
+    /// "refused" used to count as a refused connection and replaced the interface with the offline
+    /// page for that user alone.
+    #[test]
+    fn the_token_cannot_change_the_verdict() {
+        // Accepts the connection at the kernel level and never answers: the probe times out.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a local port");
+        let port = listener.local_addr().expect("its address").port();
+        let url = format!("http://127.0.0.1:{port}/vst/analyser?token=xDNSrefusedUnreachable");
+
+        let (reachable, reason) = probe_interface(&url);
+        drop(listener);
+        assert!(reachable, "a timeout must load the interface: {reason:?}");
+    }
+
+    /// The page shown when the interface cannot be reached must be able to stand on its own: no
+    /// script, no stylesheet, no image, nothing that needs the connection that has just failed.
+
     /// The page shown when the interface cannot be reached must be able to stand on its own: no
     /// script, no stylesheet, no image, nothing that needs the connection that has just failed.
     #[test]
@@ -1216,31 +1370,5 @@ mod offline_tests {
             html.contains("support@hardwavestudios.com"),
             "say where to write when it keeps failing"
         );
-    }
-}
-
-#[cfg(test)]
-mod probe_tests {
-    use super::offline_is_certain;
-
-    #[test]
-    fn only_a_definite_failure_takes_the_interface_away() {
-        // Answers: nothing is there for this machine.
-        assert!(offline_is_certain("Connection refused (os error 111)"));
-        assert!(offline_is_certain(
-            "Dns Failed: failed to lookup address information"
-        ));
-        assert!(offline_is_certain("Network is unreachable"));
-        assert!(offline_is_certain("No route to host"));
-
-        // Not answers: the WebView may still get the page.
-        assert!(!offline_is_certain("timed out reading response"));
-        assert!(!offline_is_certain("Connection timed out"));
-        assert!(!offline_is_certain(
-            "Invalid TLS certificate: UnknownIssuer"
-        ));
-        assert!(!offline_is_certain(
-            "proxy: 407 Proxy Authentication Required"
-        ));
     }
 }

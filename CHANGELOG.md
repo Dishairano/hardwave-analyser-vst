@@ -1,5 +1,10 @@
 # Hardwave Analyser — Changelog
 
+## v1.0.26
+
+- **Your licence token is no longer written into the editor log.** Before opening the window the plug-in asks whether the interface can be reached, and that question carried the token in its address. When the question failed, the whole address went into the log we ask you to send us. The question no longer carries the token, and the log no longer holds it. If a token happened to contain a word like "refused", it could also make the plug-in decide you were offline when you were not; it cannot any more.
+- **A slow name server no longer counts as being offline.** Waiting too long for an answer arrived looking the same as a name that does not exist, and the plug-in showed the offline page instead of the interface. Only a real refusal counts now.
+
 ## v1.0.25
 
 - **A window that stays empty now leaves a log we can read.** Everything the editor knew is written to a file: whether it found your licence token, which address it loaded, whether the WebView was created, whether the interface answered. All of it used to go to a console no DAW shows. It is now also appended to `%APPDATA%\hardwave\analyser-editor.log` (on macOS `~/Library/Application Support/hardwave/analyser-editor.log`). Send that file with a report and we can usually see the cause in it. It holds no audio, no project data and no licence token.
