@@ -1348,9 +1348,6 @@ mod offline_tests {
 
     /// The page shown when the interface cannot be reached must be able to stand on its own: no
     /// script, no stylesheet, no image, nothing that needs the connection that has just failed.
-
-    /// The page shown when the interface cannot be reached must be able to stand on its own: no
-    /// script, no stylesheet, no image, nothing that needs the connection that has just failed.
     #[test]
     fn offline_page_needs_nothing_from_the_network() {
         let html = offline_page("https://example.com/vst/thing?token=abc");
