@@ -335,7 +335,9 @@ impl FftProcessor {
 
         let rms = (sum_squares / samples.len() as f32).sqrt();
         let peak_db = (20.0 * (peak + 1e-10).log10()).clamp(-100.0, 0.0);
-        let true_peak_db = (20.0 * (true_peak + 1e-10).log10()).clamp(-100.0, 0.0);
+        // A true peak above 0 dBTP is the over the meter exists to show (a 0 dBFS master can peak at +3 dBTP
+        // between samples), so it is not capped at 0 like the sample peak.
+        let true_peak_db = (20.0 * (true_peak + 1e-10).log10()).clamp(-100.0, 24.0);
 
         (peak_db, rms, true_peak_db)
     }
@@ -410,6 +412,15 @@ mod tests {
         let (peak_db, _, true_peak_db) = FftProcessor::calculate_levels(&samples);
         assert!((peak_db - (-3.01)).abs() < 0.05, "sample peak {peak_db}");
         assert!(true_peak_db.abs() < 0.5, "true peak {true_peak_db}");
+    }
+
+    #[test]
+    fn test_true_peak_shows_overs_above_zero_dbtp() {
+        // Samples at exactly 0 dBFS, waveform peaking at +3.01 dB between them: the meter must say so.
+        let samples = sine(4096, 0.25, PI / 4.0, std::f32::consts::SQRT_2);
+        let (peak_db, _, true_peak_db) = FftProcessor::calculate_levels(&samples);
+        assert!(peak_db.abs() < 0.05, "sample peak {peak_db}");
+        assert!(true_peak_db > 2.5, "true peak {true_peak_db}");
     }
 
     #[test]
