@@ -1,5 +1,9 @@
 # Hardwave Analyser — Changelog
 
+## Unreleased
+
+- **A host that stops listening to the plug-in's messages can no longer take your DAW down.** The plug-in writes a few status lines to a console no DAW shows you. On Windows, if the host closed that console behind the plug-in's back, the next line crashed the plug-in and your DAW with it. A line that cannot be written is now simply dropped.
+
 ## v1.0.27-rc1
 
 - **The true-peak readout now measures true peak.** It used to show the highest sample value, which misses the peaks that form between samples once your master is converted or encoded. The Analyser now oversamples 4x the way ITU-R BS.1770 describes, so an inter-sample over shows above 0 dBTP instead of hiding just under it.

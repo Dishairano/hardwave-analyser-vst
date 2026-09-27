@@ -81,12 +81,23 @@ fn civil_from_unix(secs: i64) -> (i64, u32, u32, u32, u32, u32) {
     )
 }
 
+/// Write one line to stderr and ignore any failure.
+///
+/// `eprintln!` panics when the write fails. On Windows a host that started the
+/// plug-in with stderr on a pipe and then closed the other end turns every
+/// line into `The pipe is being closed. (os error 232)`, and the panic takes
+/// the DAW down with it. Nobody reads stderr in a DAW, so a line that cannot be
+/// written is simply dropped.
+pub fn to_stderr(line: &str) {
+    let _ = writeln!(std::io::stderr(), "{}", line);
+}
+
 /// Print a line to stderr, as before, and put it in the log file as well.
 #[macro_export]
 macro_rules! elog {
     ($($arg:tt)*) => {{
         let line = format!($($arg)*);
-        eprintln!("{}", line);
+        $crate::diag::to_stderr(&line);
         $crate::diag::record(&line);
     }};
 }
@@ -110,6 +121,51 @@ mod tests {
         assert!(line.contains("hello"));
         assert!(line.contains('Z'), "a time without a zone is ambiguous");
         assert_eq!(line.matches('-').count(), 2, "YYYY-MM-DD");
+    }
+
+    /// Set only on the child process that [`a_closed_stderr_does_not_panic`] starts.
+    const CLOSED_STDERR_CHILD: &str = "ANALYSER_TEST_CLOSED_STDERR_CHILD";
+
+    /// Runs in a child whose stderr is a pipe nobody reads any more. On Windows
+    /// that write fails with os error 232; elsewhere with a broken pipe.
+    /// `eprintln!` panics on it; `to_stderr` must not.
+    #[test]
+    fn closed_stderr_child() {
+        if std::env::var_os(CLOSED_STDERR_CHILD).is_none() {
+            return;
+        }
+        // Give the parent time to close its end of the pipe.
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        // The pipe has to be broken already, or this test proves nothing.
+        assert!(
+            writeln!(std::io::stderr(), "probe").is_err(),
+            "stderr is still writable, the parent did not close the pipe"
+        );
+        for _ in 0..3 {
+            to_stderr("[HardwaveAnalyser] a line nobody will read");
+        }
+    }
+
+    #[test]
+    fn a_closed_stderr_does_not_panic() {
+        use std::process::{Command, Stdio};
+
+        let exe = std::env::current_exe().expect("test binary path");
+        let mut child = Command::new(exe)
+            .args(["diag::tests::closed_stderr_child", "--exact", "--nocapture"])
+            .env(CLOSED_STDERR_CHILD, "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("start the child test");
+        // Close the read end so every write to the child's stderr fails.
+        drop(child.stderr.take());
+        let status = child.wait().expect("wait for the child test");
+        assert!(
+            status.success(),
+            "writing to a closed stderr panicked: {status}"
+        );
     }
 
     #[test]
