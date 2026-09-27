@@ -1,5 +1,9 @@
 # Hardwave Analyser — Changelog
 
+## v1.0.27-rc1
+
+- **The true-peak readout now measures true peak.** It used to show the highest sample value, which misses the peaks that form between samples once your master is converted or encoded. The Analyser now oversamples 4x the way ITU-R BS.1770 describes, so an inter-sample over shows above 0 dBTP instead of hiding just under it.
+
 ## v1.0.26
 
 - **Your licence token is no longer written into the editor log.** Before opening the window the plug-in asks whether the interface can be reached, and that question carried the token in its address. When the question failed, the whole address went into the log we ask you to send us. The question no longer carries the token, and the log no longer holds it. If a token happened to contain a word like "refused", it could also make the plug-in decide you were offline when you were not; it cannot any more.
