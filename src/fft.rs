@@ -103,6 +103,121 @@ fn build_window(wf: WindowFn, size: usize) -> Vec<f32> {
     }
 }
 
+/// Oversampling factor for true-peak metering.
+const TP_PHASES: usize = 4;
+/// Taps per polyphase branch (48-tap prototype / 4 phases).
+const TP_TAPS: usize = 12;
+
+/// Interpolation filter from ITU-R BS.1770-4 Annex 2, one row per phase.
+/// Kept in f64 so the published values are written out exactly.
+const TP_REFERENCE: [[f64; TP_TAPS]; TP_PHASES] = [
+    [
+        0.001_708_984_375,
+        0.010_986_328_125,
+        -0.019_653_320_312_5,
+        0.033_203_125,
+        -0.059_448_242_187_5,
+        0.137_329_101_562_5,
+        0.972_167_968_75,
+        -0.102_294_921_875,
+        0.047_607_421_875,
+        -0.026_611_328_125,
+        0.014_892_578_125,
+        -0.008_300_781_25,
+    ],
+    [
+        -0.029_174_804_687_5,
+        0.029_296_875,
+        -0.051_757_812_5,
+        0.089_111_328_125,
+        -0.166_503_906_25,
+        0.465_087_890_625,
+        0.779_785_156_25,
+        -0.200_317_382_812_5,
+        0.101_562_5,
+        -0.058_227_539_062_5,
+        0.033_081_054_687_5,
+        -0.018_920_898_437_5,
+    ],
+    [
+        -0.018_920_898_437_5,
+        0.033_081_054_687_5,
+        -0.058_227_539_062_5,
+        0.101_562_5,
+        -0.200_317_382_812_5,
+        0.779_785_156_25,
+        0.465_087_890_625,
+        -0.166_503_906_25,
+        0.089_111_328_125,
+        -0.051_757_812_5,
+        0.029_296_875,
+        -0.029_174_804_687_5,
+    ],
+    [
+        -0.008_300_781_25,
+        0.014_892_578_125,
+        -0.026_611_328_125,
+        0.047_607_421_875,
+        -0.102_294_921_875,
+        0.972_167_968_75,
+        0.137_329_101_562_5,
+        -0.059_448_242_187_5,
+        0.033_203_125,
+        -0.019_653_320_312_5,
+        0.010_986_328_125,
+        0.001_708_984_375,
+    ],
+];
+
+/// The reference filter with every phase scaled to unity gain at DC. The
+/// published coefficients are rounded, which leaves the phase gains between
+/// about -0.24 dB and +0.01 dB; without this a constant signal would read
+/// slightly above its own sample value.
+const TP_FILTER: [[f32; TP_TAPS]; TP_PHASES] = normalise_phases(TP_REFERENCE);
+
+const fn normalise_phases(reference: [[f64; TP_TAPS]; TP_PHASES]) -> [[f32; TP_TAPS]; TP_PHASES] {
+    let mut filter = [[0.0_f32; TP_TAPS]; TP_PHASES];
+    let mut p = 0;
+    while p < TP_PHASES {
+        let mut sum = 0.0;
+        let mut k = 0;
+        while k < TP_TAPS {
+            sum += reference[p][k];
+            k += 1;
+        }
+        let mut k = 0;
+        while k < TP_TAPS {
+            filter[p][k] = (reference[p][k] / sum) as f32;
+            k += 1;
+        }
+        p += 1;
+    }
+    filter
+}
+
+/// Largest absolute value of the 4× oversampled signal.
+///
+/// The caller passes the whole analysis window, so the filter history comes
+/// from the window itself: an output is only computed where all 12 input
+/// samples lie inside the slice. Nothing is carried between calls, and the
+/// few intervals at the very edges are covered by the sample peak and by
+/// the next, overlapping window.
+fn oversampled_peak(samples: &[f32]) -> f32 {
+    let mut max = 0.0_f32;
+    for history in samples.windows(TP_TAPS) {
+        for phase in &TP_FILTER {
+            // history[TP_TAPS - 1] is the newest sample, paired with tap 0.
+            let y: f32 = phase
+                .iter()
+                .zip(history.iter().rev())
+                .map(|(h, x)| h * x)
+                .sum();
+            max = max.max(y.abs());
+        }
+    }
+    max
+}
+
 /// FFT processor for a single channel
 pub struct FftProcessor {
     /// FFT plan, created once — FFT_SIZE never changes at runtime.
@@ -199,7 +314,9 @@ impl FftProcessor {
     }
 
     /// Calculate peak, RMS, and true-peak levels from samples.
-    /// True peak uses 4× linear interpolation oversampling.
+    /// True peak follows ITU-R BS.1770-4 Annex 2: 4× oversampling through a
+    /// 48-tap polyphase FIR, then the maximum absolute value. The sample peak
+    /// is included, so the true peak never reads below it.
     /// Returns (peak_db, rms_linear, true_peak_db).
     pub fn calculate_levels(samples: &[f32]) -> (f32, f32, f32) {
         if samples.is_empty() {
@@ -207,29 +324,20 @@ impl FftProcessor {
         }
 
         let mut peak = 0.0_f32;
-        let mut true_peak = 0.0_f32;
         let mut sum_squares = 0.0_f32;
 
-        for (idx, &s) in samples.iter().enumerate() {
-            let abs_s = s.abs();
-            peak = peak.max(abs_s);
+        for &s in samples {
+            peak = peak.max(s.abs());
             sum_squares += s * s;
-
-            // 4× oversampled true peak (linear interpolation between consecutive samples)
-            if idx > 0 {
-                let prev = samples[idx - 1];
-                for k in 1..4 {
-                    let t = k as f32 / 4.0;
-                    let interp = prev + (s - prev) * t;
-                    true_peak = true_peak.max(interp.abs());
-                }
-            }
-            true_peak = true_peak.max(abs_s);
         }
+
+        let true_peak = peak.max(oversampled_peak(samples));
 
         let rms = (sum_squares / samples.len() as f32).sqrt();
         let peak_db = (20.0 * (peak + 1e-10).log10()).clamp(-100.0, 0.0);
-        let true_peak_db = (20.0 * (true_peak + 1e-10).log10()).clamp(-100.0, 0.0);
+        // A true peak above 0 dBTP is the over the meter exists to show (a 0 dBFS master can peak at +3 dBTP
+        // between samples), so it is not capped at 0 like the sample peak.
+        let true_peak_db = (20.0 * (true_peak + 1e-10).log10()).clamp(-100.0, 24.0);
 
         (peak_db, rms, true_peak_db)
     }
@@ -288,6 +396,81 @@ mod tests {
         assert!((peak_db - (-6.02)).abs() < 0.1);
         assert!((rms - 0.5).abs() < 0.01);
         assert!(true_peak_db >= peak_db); // true peak >= sample peak
+    }
+
+    fn sine(len: usize, cycles_per_sample: f32, phase: f32, amp: f32) -> Vec<f32> {
+        (0..len)
+            .map(|i| amp * (2.0 * PI * cycles_per_sample * i as f32 + phase).sin())
+            .collect()
+    }
+
+    #[test]
+    fn test_true_peak_finds_inter_sample_peak() {
+        // fs/4 with a 45 degree offset: every sample sits at ±0.707 (-3.01 dBFS)
+        // while the waveform itself reaches ±1.0 between samples.
+        let samples = sine(4096, 0.25, PI / 4.0, 1.0);
+        let (peak_db, _, true_peak_db) = FftProcessor::calculate_levels(&samples);
+        assert!((peak_db - (-3.01)).abs() < 0.05, "sample peak {peak_db}");
+        assert!(true_peak_db.abs() < 0.5, "true peak {true_peak_db}");
+    }
+
+    #[test]
+    fn test_true_peak_shows_overs_above_zero_dbtp() {
+        // Samples at exactly 0 dBFS, waveform peaking at +3.01 dB between them: the meter must say so.
+        let samples = sine(4096, 0.25, PI / 4.0, std::f32::consts::SQRT_2);
+        let (peak_db, _, true_peak_db) = FftProcessor::calculate_levels(&samples);
+        assert!(peak_db.abs() < 0.05, "sample peak {peak_db}");
+        assert!(true_peak_db > 2.5, "true peak {true_peak_db}");
+    }
+
+    #[test]
+    fn test_true_peak_low_frequency_sine_matches_sample_peak() {
+        // 997 Hz at 48 kHz, -6 dBFS.
+        let samples = sine(48000, 997.0 / 48000.0, 0.0, 0.5);
+        let (peak_db, _, true_peak_db) = FftProcessor::calculate_levels(&samples);
+        assert!(
+            (true_peak_db - peak_db).abs() < 0.1,
+            "peak {peak_db} true peak {true_peak_db}"
+        );
+    }
+
+    #[test]
+    fn test_true_peak_dc_and_silence() {
+        let (_, _, silence_db) = FftProcessor::calculate_levels(&[0.0; 1024]);
+        assert_eq!(silence_db, -100.0);
+
+        let (peak_db, _, dc_db) = FftProcessor::calculate_levels(&[0.5; 1024]);
+        assert!((dc_db - peak_db).abs() < 1e-4, "peak {peak_db} dc {dc_db}");
+
+        let (_, _, full_dc_db) = FftProcessor::calculate_levels(&[1.0; 1024]);
+        assert_eq!(full_dc_db, 0.0);
+
+        let (_, _, neg_dc_db) = FftProcessor::calculate_levels(&[-0.25; 1024]);
+        assert!(
+            (neg_dc_db - (-12.04)).abs() < 0.01,
+            "negative dc {neg_dc_db}"
+        );
+    }
+
+    #[test]
+    fn test_true_peak_filter_phases_have_unity_dc_gain() {
+        for phase in &TP_FILTER {
+            let sum: f32 = phase.iter().sum();
+            assert!((sum - 1.0).abs() < 1e-6, "phase gain {sum}");
+        }
+    }
+
+    #[test]
+    fn test_true_peak_short_and_non_finite_input() {
+        // Shorter than the filter: falls back to the sample peak.
+        let (peak_db, _, tp_db) = FftProcessor::calculate_levels(&[0.1, -0.2, 0.3]);
+        assert_eq!(tp_db, peak_db);
+
+        let mut samples = sine(256, 0.01, 0.0, 0.5);
+        samples[100] = f32::NAN;
+        samples[150] = f32::INFINITY;
+        let (_, _, tp_db) = FftProcessor::calculate_levels(&samples);
+        assert!(tp_db.is_finite());
     }
 
     #[test]
