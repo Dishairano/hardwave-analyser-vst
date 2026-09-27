@@ -92,7 +92,9 @@ fn is_our_own_build() -> bool {
 
 fn send_crash(plugin_slug: &str, message: &str, top_frame: &str, stack: &str) {
     if is_our_own_build() {
-        eprintln!("[{plugin_slug}] panic in our own build, not reported: {message}");
+        crate::diag::to_stderr(&format!(
+            "[{plugin_slug}] panic in our own build, not reported: {message}"
+        ));
         return;
     }
     let machine_id = load_or_create_machine_id();
