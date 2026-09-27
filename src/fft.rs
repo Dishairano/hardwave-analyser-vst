@@ -174,9 +174,7 @@ const TP_REFERENCE: [[f32; TP_TAPS]; TP_PHASES] = [
 /// slightly above its own sample value.
 const TP_FILTER: [[f32; TP_TAPS]; TP_PHASES] = normalise_phases(TP_REFERENCE);
 
-const fn normalise_phases(
-    mut filter: [[f32; TP_TAPS]; TP_PHASES],
-) -> [[f32; TP_TAPS]; TP_PHASES] {
+const fn normalise_phases(mut filter: [[f32; TP_TAPS]; TP_PHASES]) -> [[f32; TP_TAPS]; TP_PHASES] {
     let mut p = 0;
     while p < TP_PHASES {
         let mut sum = 0.0;
@@ -435,7 +433,10 @@ mod tests {
         assert_eq!(full_dc_db, 0.0);
 
         let (_, _, neg_dc_db) = FftProcessor::calculate_levels(&[-0.25; 1024]);
-        assert!((neg_dc_db - (-12.04)).abs() < 0.01, "negative dc {neg_dc_db}");
+        assert!(
+            (neg_dc_db - (-12.04)).abs() < 0.01,
+            "negative dc {neg_dc_db}"
+        );
     }
 
     #[test]
