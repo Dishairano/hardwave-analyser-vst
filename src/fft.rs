@@ -109,7 +109,8 @@ const TP_PHASES: usize = 4;
 const TP_TAPS: usize = 12;
 
 /// Interpolation filter from ITU-R BS.1770-4 Annex 2, one row per phase.
-const TP_REFERENCE: [[f32; TP_TAPS]; TP_PHASES] = [
+/// Kept in f64 so the published values are written out exactly.
+const TP_REFERENCE: [[f64; TP_TAPS]; TP_PHASES] = [
     [
         0.001_708_984_375,
         0.010_986_328_125,
@@ -174,18 +175,19 @@ const TP_REFERENCE: [[f32; TP_TAPS]; TP_PHASES] = [
 /// slightly above its own sample value.
 const TP_FILTER: [[f32; TP_TAPS]; TP_PHASES] = normalise_phases(TP_REFERENCE);
 
-const fn normalise_phases(mut filter: [[f32; TP_TAPS]; TP_PHASES]) -> [[f32; TP_TAPS]; TP_PHASES] {
+const fn normalise_phases(reference: [[f64; TP_TAPS]; TP_PHASES]) -> [[f32; TP_TAPS]; TP_PHASES] {
+    let mut filter = [[0.0_f32; TP_TAPS]; TP_PHASES];
     let mut p = 0;
     while p < TP_PHASES {
         let mut sum = 0.0;
         let mut k = 0;
         while k < TP_TAPS {
-            sum += filter[p][k];
+            sum += reference[p][k];
             k += 1;
         }
         let mut k = 0;
         while k < TP_TAPS {
-            filter[p][k] /= sum;
+            filter[p][k] = (reference[p][k] / sum) as f32;
             k += 1;
         }
         p += 1;
