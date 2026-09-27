@@ -154,7 +154,7 @@ jobs:
           # Clean tags publish as stable Latest; -rc/-beta stay pre-release.
           prerelease: ${{ contains(steps.version.outputs.version, '-') }}
           make_latest: ${{ !contains(steps.version.outputs.version, '-') }}
-          generate_release_notes: true
+          generate_release_notes: false
           files: |
             artifacts/hardwave-analyser-linux-x64/*.tar.gz
             artifacts/hardwave-analyser-windows-x64/*.zip
@@ -162,39 +162,9 @@ jobs:
           body: |
             ## Hardwave Analyser ${{ steps.version.outputs.version }}
 
-            VST3/CLAP spectrum analyser plugin — powered by Hardwave Studios.
+            Install and update Hardwave Analyser through the Hardwave Suite: https://hardwavestudios.com/downloads
 
-            ### Downloads
-
-            | Platform | File |
-            |----------|------|
-            | Linux x64 | `hardwave-analyser-linux-x64.tar.gz` |
-            | Windows x64 | `hardwave-analyser-windows-x64.zip` |
-            | macOS (Universal) | `hardwave-analyser-macos-universal.zip` |
-
-            ### Installation
-
-            **Windows:**
-            1. Extract the zip
-            2. Copy `hardwave-analyser.vst3` folder to `C:\Program Files\Common Files\VST3\`
-            3. Copy `hardwave-analyser.clap` to `C:\Program Files\Common Files\CLAP\`
-
-            **Linux:**
-            1. Extract: `tar -xzf hardwave-analyser-linux-x64.tar.gz`
-            2. Copy to `~/.vst3/` and `~/.clap/`
-
-            **macOS:**
-            1. Extract the zip
-            2. Copy `hardwave-analyser.vst3` to `~/Library/Audio/Plug-Ins/VST3/`
-            3. Copy `hardwave-analyser.clap` to `~/Library/Audio/Plug-Ins/CLAP/`
-
-            > **Note:** On first launch macOS may show a security warning. Right-click the plugin in Finder and choose Open, or go to System Settings → Privacy & Security and click Allow.
-
-            ### Usage
-
-            1. Add **Hardwave Analyser** to any channel in your DAW
-            2. The plugin opens an embedded spectrum analyser (free for everyone — sign in once with your free account)
-            3. Log in once — credentials are saved locally
+            The files below are the builds the Suite installs. What changed is in CHANGELOG.md.
 
       # sync-version + product DB updates are gated to STABLE tags only.
       # Pre-release tags (-alpha/-beta/-rc) build binaries and create the GH pre-release,
