@@ -2,7 +2,7 @@
 
 ## v1.0.28-rc1
 
-- **A host that closes the plug-in's message channel can no longer take your DAW down.** On Windows a host may close the pipe the plug-in writes its own log lines to. Writing the next line then failed hard and the crash took the whole DAW with it. Those lines are now dropped when nobody is listening, which is what a log line deserves. Reported by a producer running MPC, and fixed in every Hardwave plug-in.
+- **A closed message channel can no longer take your DAW down.** When a host closes the pipe the plug-in writes its own log lines to, writing the next line failed hard and the crash took the DAW with it. Those lines are now dropped when nobody is listening, which is what a log line deserves.
 
 ## v1.0.27-rc1
 
