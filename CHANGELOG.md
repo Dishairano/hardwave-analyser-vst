@@ -1,5 +1,10 @@
 # Hardwave Analyser — Changelog
 
+## v1.0.28-rc1
+
+- Release page: point to the Hardwave Suite instead of manual install steps
+- A host that closes the plug-in's console can no longer crash your DAW (#7)
+
 ## v1.0.27-rc1
 
 - **The true-peak readout now measures true peak.** It used to show the highest sample value, which misses the peaks that form between samples once your master is converted or encoded. The Analyser now oversamples 4x the way ITU-R BS.1770 describes, so an inter-sample over shows above 0 dBTP instead of hiding just under it.
