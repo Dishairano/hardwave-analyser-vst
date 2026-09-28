@@ -340,7 +340,11 @@ jobs:
           for PAIR in windows:hardwave-analyser-windows-x64.zip macos:hardwave-analyser-macos-universal.zip linux:hardwave-analyser-linux-x64.tar.gz; do
             PLATFORM="${PAIR%%:*}"
             FILE="${PAIR#*:}"
-            if ! curl -sfL --retry 5 --retry-delay 10 --retry-all-errors -o "$FILE" "$BASE/$FILE"; then
+            # The four closed-beta repositories are private, where the plain download URL 404s, so the
+
+            # build is fetched with the workflow's own token.
+
+            if ! GH_TOKEN="${{ secrets.GITHUB_TOKEN }}" gh release download "$VERSION" --repo "$GITHUB_REPOSITORY" --pattern "$FILE" --output "$FILE" --clobber; then
               echo "::warning::$FILE is not on the release, so $PLATFORM testers get no beta build."
               continue
             fi
