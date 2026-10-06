@@ -323,3 +323,53 @@ fn base64_decode(s: &str) -> Option<Vec<u8>> {
     use base64::Engine as _;
     base64::engine::general_purpose::STANDARD.decode(s).ok()
 }
+
+/// What is hosting this plug-in, when we can tell.
+///
+/// Our own plug-ins are free inside the Hardwave DAW and paid in
+/// every other host, so the window has to be able to say which it is
+/// in. The DAW marks its own process before anything loads, and a
+/// plug-in loaded into it inherits that.
+///
+/// Nothing is claimed when the variable is absent: a plug-in in FL or
+/// Ableton simply says nothing, and the page falls back to the
+/// licence the user has.
+pub fn host_kind() -> Option<String> {
+    if let Ok(host) = std::env::var("HARDWAVE_HOST") {
+        let host = host.trim().to_lowercase();
+        if !host.is_empty() {
+            return Some(host);
+        }
+    }
+    // The same answer by another road, for a host that strips the
+    // environment: the program we are loaded into is named after
+    // itself.
+    let exe = std::env::current_exe().ok()?;
+    let name = exe.file_stem()?.to_string_lossy().to_lowercase();
+    name.contains("hardwave-daw")
+        .then(|| "hardwave-daw".to_string())
+}
+
+/// `&host=...` for the window's URL, or nothing when we are a guest
+/// in someone else's host.
+pub fn host_query(separator: char) -> String {
+    match host_kind() {
+        Some(host) => format!("{separator}host={host}"),
+        None => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod host_tests {
+    use super::*;
+
+    #[test]
+    fn the_host_is_named_only_when_it_is_known() {
+        if std::env::var("HARDWAVE_HOST").is_err() {
+            assert!(
+                host_query('&').is_empty(),
+                "a plug-in in someone else's host claims nothing"
+            );
+        }
+    }
+}

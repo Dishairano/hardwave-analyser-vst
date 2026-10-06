@@ -364,6 +364,10 @@ impl HardwaveAnalyserEditor {
             Some(t) => format!("{}?token={}", ANALYSER_URL, t),
             None => ANALYSER_URL.to_string(),
         };
+        // Inside our own DAW the plug-ins are free; everywhere else
+        // they are not, so the page is told which this is.
+        let separator = if url.contains('?') { '&' } else { '?' };
+        url.push_str(&crate::auth::host_query(separator));
         if let Some(port) = packet_port {
             let sep = if url.contains('?') { '&' } else { '?' };
             url.push_str(&format!("{}packetPort={}", sep, port));
