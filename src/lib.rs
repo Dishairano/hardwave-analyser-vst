@@ -10,6 +10,8 @@
 // expression with a semicolon. Newer rustc warns about that, and builds
 // that deny warnings then fail on code that is not ours. Remove this when
 // vst3_com is updated.
+#![allow(unknown_lints)]
+#![allow(semicolon_in_expressions_from_macros)]
 #![allow(semicolon_in_expressions_from_non_local_macros)]
 
     clippy::needless_range_loop,
