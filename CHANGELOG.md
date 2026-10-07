@@ -1,5 +1,9 @@
 # Hardwave Analyser — Changelog
 
+## v1.0.29-rc1
+
+- Say which host the plug-in is running in
+
 ## v1.0.28-rc1
 
 - **A closed message channel can no longer take your DAW down.** When a host closes the pipe the plug-in writes its own log lines to, writing the next line failed hard and the crash took the DAW with it. Those lines are now dropped when nobody is listening, which is what a log line deserves.
