@@ -358,12 +358,15 @@ impl HardwaveAnalyserEditor {
         }
     }
 
+    /// The window's address: the page, the host it runs in and, on Windows, the packet server's
+    /// port.
+    ///
+    /// The sign-in token is never on it, whatever this editor holds. A URL is written down by
+    /// everything it passes: nginx kept seven-day tokens in the access logs of both webview
+    /// servers, and the address also lands in history. The token reaches the page through the
+    /// initialization script instead, see [`token_script`].
     fn build_url(&self, packet_port: Option<u16>) -> String {
-        let token = self.auth_token.lock();
-        let mut url = match token.as_deref() {
-            Some(t) => format!("{}?token={}", ANALYSER_URL, t),
-            None => ANALYSER_URL.to_string(),
-        };
+        let mut url = ANALYSER_URL.to_string();
         // Inside our own DAW the plug-ins are free; everywhere else
         // they are not, so the page is told which this is.
         let separator = if url.contains('?') { '&' } else { '?' };
@@ -373,6 +376,60 @@ impl HardwaveAnalyserEditor {
             url.push_str(&format!("{}packetPort={}", sep, port));
         }
         url
+    }
+}
+
+/// The part of the initialization script that hands the page its sign-in token.
+///
+/// It sets `window.__HARDWAVE_VST_TOKEN` before any of the page's own code runs: the token as a
+/// JSON string, or `null` when nobody is signed in. An initialization script runs on every page
+/// the window ever loads, so the token is set only on hardwavestudios.com and its subdomains,
+/// and only over https; any other page never sees the variable at all.
+///
+/// The token is only ever written through [`js_literal`], never spliced into the script text, so
+/// a quote or a `</script>` in it stays inside the string.
+fn token_script(token: Option<&str>) -> String {
+    let mut script = String::from(
+        "if (location.protocol === 'https:' && (location.hostname === 'hardwavestudios.com' \
+         || location.hostname.endsWith('.hardwavestudios.com'))) {\n    \
+         window.__HARDWAVE_VST_TOKEN = ",
+    );
+    script.push_str(&js_literal(token));
+    script.push_str(";\n}\n");
+    script
+}
+
+/// `value` as a JavaScript literal: a JSON string, or `null`.
+///
+/// serde_json does the quoting and the backslashes. It leaves `<`, `>` and `&` as they are,
+/// which is valid JSON but would let the value spell `</script>` if the script ever ends up in a
+/// page, and U+2028 and U+2029, which older script engines refuse inside a string. Those are
+/// written as `\u` escapes as well. Every one of these characters can only sit inside the
+/// string, so the escapes change nothing but the spelling.
+fn js_literal(value: Option<&str>) -> String {
+    // Serializing a string or None cannot fail; `null` is the safe answer if it ever did.
+    let json = serde_json::to_string(&value).unwrap_or_else(|_| "null".to_string());
+    let mut literal = String::with_capacity(json.len());
+    for c in json.chars() {
+        match c {
+            '<' => literal.push_str("\\u003c"),
+            '>' => literal.push_str("\\u003e"),
+            '&' => literal.push_str("\\u0026"),
+            '\u{2028}' => literal.push_str("\\u2028"),
+            '\u{2029}' => literal.push_str("\\u2029"),
+            c => literal.push(c),
+        }
+    }
+    literal
+}
+
+/// The line the log gets about the sign-in token: whether it was handed to the page, never the
+/// token itself.
+fn token_log_line(token: Option<&str>) -> &'static str {
+    if token.is_some() {
+        "[HardwaveAnalyser] sign-in token: injected by the initialization script"
+    } else {
+        "[HardwaveAnalyser] sign-in token: absent, null injected"
     }
 }
 
@@ -626,8 +683,9 @@ fn interface_reachable(url: &str) -> bool {
 
 /// The probe itself: whether to load the interface, and why the probe failed if it did.
 ///
-/// The probe asks the address without its query string. The query carries the licence token, and
-/// the probe has no use for it: it only asks whether the host answers. Before, the token went out
+/// The probe asks the address without its query string. The query used to carry the licence token
+/// (it is in the initialization script now), and the probe has no use for any of the query: it
+/// only asks whether the host answers. Before, the token went out
 /// on this extra request, and because ureq writes the full URL into its error text, it also went
 /// into `wettboi-editor.log` on every failed probe, the one file we ask users to send us.
 ///
@@ -828,6 +886,14 @@ impl Editor for HardwaveAnalyserEditor {
             sw.mark(&format!("packet server bound (port {})", server_port));
 
             let url = self.build_url(Some(server_port));
+            let (token_line, token_log) = {
+                let token = self.auth_token.lock();
+                (
+                    token_script(token.as_deref()),
+                    token_log_line(token.as_deref()),
+                )
+            };
+            elog!("{}", token_log);
 
             let init_script = format!(
                 r#"
@@ -839,6 +905,7 @@ impl Editor for HardwaveAnalyserEditor {
                 }});
 
                 window.__HARDWAVE_VST = true;
+                {token_line}
                 window.__hardwave = {{
                     version: "{version}",
                     os: "{os}",
@@ -855,6 +922,7 @@ impl Editor for HardwaveAnalyserEditor {
                     if (e.key === 'F12') e.preventDefault();
                 }});
                 "#,
+                token_line = token_line,
                 version = env!("CARGO_PKG_VERSION"),
                 os = PLUGIN_OS,
             );
@@ -968,6 +1036,14 @@ impl Editor for HardwaveAnalyserEditor {
             };
 
             let url = self.build_url(None);
+            let (token_line, token_log) = {
+                let token = self.auth_token.lock();
+                (
+                    token_script(token.as_deref()),
+                    token_log_line(token.as_deref()),
+                )
+            };
+            elog!("{}", token_log);
             let initial_scale = f32::from_bits(self.scale.load(Ordering::Relaxed));
 
             let handle = thread::spawn(move || {
@@ -1079,6 +1155,7 @@ impl Editor for HardwaveAnalyserEditor {
                         }});
 
                         window.__HARDWAVE_VST = true;
+                        {token_line}
                         {preset_state_line}
                         {sub_valid_line}
                         window.__hardwave = {{
@@ -1100,6 +1177,7 @@ impl Editor for HardwaveAnalyserEditor {
                             if (e.key === 'F12') e.preventDefault();
                         }});
                         "#,
+                        token_line = token_line,
                         preset_state_line = preset_state_line,
                         sub_valid_line = sub_valid_line,
                         version = env!("CARGO_PKG_VERSION"),
@@ -1371,5 +1449,141 @@ mod offline_tests {
             html.contains("support@hardwavestudios.com"),
             "say where to write when it keeps failing"
         );
+    }
+}
+
+#[cfg(test)]
+mod token_tests {
+    use super::*;
+
+    /// An editor holding `token`, built by hand: `new` reads the real token from disk and, on
+    /// Windows, starts the WebView2 check.
+    fn editor_holding(token: Option<&str>) -> HardwaveAnalyserEditor {
+        HardwaveAnalyserEditor {
+            packet_slot: Arc::new(Mutex::new(None)),
+            auth_token: Arc::new(Mutex::new(token.map(str::to_string))),
+            scale: Arc::new(AtomicU32::new(1.0f32.to_bits())),
+            refresh_interval_ms: Arc::new(AtomicU32::new(16)),
+            editor_size: Arc::new(Mutex::new((EDITOR_WIDTH, EDITOR_HEIGHT))),
+            resize_tx: Arc::new(Mutex::new(None)),
+            instance_id: unique_instance_id(),
+            params: Arc::new(HardwaveAnalyserParams::default()),
+            #[cfg(target_os = "windows")]
+            webview2_probe: Mutex::new(None),
+        }
+    }
+
+    /// The window's address goes into server logs and history, so the token must never be on it,
+    /// whether the editor holds one or not. The host and the packet port stay where they were.
+    #[test]
+    fn the_url_never_carries_the_token() {
+        let signed_in = editor_holding(Some("secret-token-zq9x"));
+        let signed_out = editor_holding(None);
+        for port in [Some(51234), None] {
+            let with_token = signed_in.build_url(port);
+            let without_token = signed_out.build_url(port);
+            for url in [&with_token, &without_token] {
+                assert!(!url.contains("token"), "token in the window's URL: {url}");
+                assert!(!url.contains("zq9x"), "token value in the URL: {url}");
+                assert!(url.starts_with(ANALYSER_URL), "wrong page: {url}");
+                assert!(
+                    url.contains(&crate::auth::host_query('?')),
+                    "the host must still be named: {url}"
+                );
+            }
+            assert_eq!(
+                with_token, without_token,
+                "being signed in must not change the address"
+            );
+            if let Some(port) = port {
+                assert!(
+                    with_token.contains(&format!("packetPort={port}")),
+                    "the packet port must still be there: {with_token}"
+                );
+            }
+        }
+    }
+
+    /// The token reaches the page as a JSON string literal and nowhere else in the script.
+    #[test]
+    fn the_script_holds_the_token_only_as_a_json_string() {
+        let token = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiI0MiJ9.c2lnbmF0dXJl";
+        let json = serde_json::to_string(token).expect("a string always serializes");
+        let script = token_script(Some(token));
+
+        assert!(
+            script.contains(&format!("window.__HARDWAVE_VST_TOKEN = {json};")),
+            "the token must be assigned as a JSON string: {script}"
+        );
+        assert_eq!(script.matches(token).count(), 1, "one copy of the token");
+        assert_eq!(
+            script.matches(json.as_str()).count(),
+            1,
+            "and that copy is the JSON string"
+        );
+    }
+
+    #[test]
+    fn without_a_token_the_page_gets_null() {
+        let script = token_script(None);
+        assert!(
+            script.contains("window.__HARDWAVE_VST_TOKEN = null;"),
+            "no token must read as null: {script}"
+        );
+    }
+
+    /// The initialization script runs on every page the window loads; only our own domain may see
+    /// the token.
+    #[test]
+    fn the_token_is_set_only_on_our_own_domain() {
+        for token in [Some("abc"), None] {
+            let script = token_script(token);
+            assert!(
+                script.contains("location.hostname === 'hardwavestudios.com'"),
+                "{script}"
+            );
+            assert!(
+                script.contains("location.hostname.endsWith('.hardwavestudios.com')"),
+                "{script}"
+            );
+            assert!(
+                script.contains("location.protocol === 'https:'"),
+                "{script}"
+            );
+            assert!(
+                script.trim_start().starts_with("if (") && script.trim_end().ends_with('}'),
+                "the assignment must sit inside the check, with nothing outside it: {script}"
+            );
+        }
+    }
+
+    /// A quote, a backslash or a `</script>` in a token must not end the string or the script.
+    #[test]
+    fn a_hostile_token_stays_inside_the_string() {
+        let token = "a\"b\\c</script><script>alert(1)</script>&\u{2028}";
+        let literal = js_literal(Some(token));
+        assert_eq!(
+            literal,
+            "\"a\\\"b\\\\c\\u003c/script\\u003e\\u003cscript\\u003ealert(1)\\u003c/script\\u003e\\u0026\\u2028\""
+        );
+
+        // Still exactly the token to anything that reads the literal.
+        let read_back: String = serde_json::from_str(&literal).expect("valid JSON");
+        assert_eq!(read_back, token);
+
+        let script = token_script(Some(token));
+        assert!(!script.contains("</script"), "raw </script> in: {script}");
+        assert!(!script.contains(token), "raw token in: {script}");
+    }
+
+    /// The log says whether the token was handed over, never what it is.
+    #[test]
+    fn the_log_line_names_no_token() {
+        let token = "secret-token-1234";
+        let injected = token_log_line(Some(token));
+        let absent = token_log_line(None);
+        assert!(injected.contains("injected"), "{injected}");
+        assert!(absent.contains("absent"), "{absent}");
+        assert!(!injected.contains(token) && !absent.contains(token));
     }
 }
