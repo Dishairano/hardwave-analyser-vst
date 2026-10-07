@@ -6,6 +6,10 @@
 //! the Hardwave Analyser from hardwave.studio inside the DAW plugin window.
 
 #![allow(
+    clippy::needless_range_loop,
+    clippy::too_many_arguments,
+    clippy::type_complexity
+)]
 // The vst3_com vtable macro, expanded by nih_export_vst3!, ends an
 // expression with a semicolon. Newer rustc warns about that, and builds
 // that deny warnings then fail on code that is not ours. Remove this when
@@ -13,11 +17,6 @@
 #![allow(unknown_lints)]
 #![allow(semicolon_in_expressions_from_macros)]
 #![allow(semicolon_in_expressions_from_non_local_macros)]
-
-    clippy::needless_range_loop,
-    clippy::too_many_arguments,
-    clippy::type_complexity
-)]
 mod auth;
 #[macro_use]
 pub mod diag;
