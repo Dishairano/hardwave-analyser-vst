@@ -1,5 +1,10 @@
 # Hardwave Analyser — Changelog
 
+## v1.0.30-rc1
+
+- Your sign-in no longer travels in the plug-in window's web address (#11)
+- Developer seat: remaining changes (#10)
+
 ## v1.0.29-rc1
 
 - Say which host the plug-in is running in
