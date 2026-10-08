@@ -1,5 +1,11 @@
 # Hardwave Analyser — Changelog
 
+## v1.0.30-rc1
+
+- Your sign-in no longer travels in the plug-in window's web address (#11)
+- True peak now reads exactly per BS.1770 (it read about 0.3 dB high), and peaks above 0 dBFS are shown instead of stopping at 0 (#10)
+- The plug-in measures loudness itself on every sample, the groundwork for exact LUFS and loudness range in the window (#10)
+
 ## v1.0.29-rc1
 
 - Say which host the plug-in is running in
