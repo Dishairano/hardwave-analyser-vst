@@ -23,6 +23,7 @@ pub mod diag;
 #[cfg(feature = "gui")]
 mod editor;
 mod fft;
+mod loudness;
 mod params;
 mod protocol;
 mod websocket;
@@ -35,6 +36,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use fft::{FftProcessor, FFT_SIZE, WELCH_MIN_SAMPLES};
+use loudness::LoudnessMeter;
 use params::HardwaveAnalyserParams;
 use protocol::AudioPacket;
 use websocket::WebSocketClient;
@@ -163,6 +165,9 @@ pub struct HardwaveAnalyser {
     /// Sample buffer for right channel
     buffer_right: VecDeque<f32>,
 
+    /// BS.1770 / EBU R128 loudness, measured on every sample
+    loudness: LoudnessMeter,
+
     /// Current sample rate
     sample_rate: f32,
 
@@ -205,6 +210,7 @@ impl Default for HardwaveAnalyser {
             fft_right: FftProcessor::new(),
             buffer_left: VecDeque::with_capacity(WELCH_MIN_SAMPLES),
             buffer_right: VecDeque::with_capacity(WELCH_MIN_SAMPLES),
+            loudness: LoudnessMeter::new(48000.0),
             sample_rate: 48000.0,
             samples_since_send: 0,
             samples_per_send: 800, // 48000 / 60 = 800 samples for 60Hz default
@@ -293,6 +299,10 @@ impl Plugin for HardwaveAnalyser {
         self.buffer_left.clear();
         self.buffer_right.clear();
 
+        // Redesign the K-weighting for this rate and size the 3 s window
+        // (allocates here, never in process). Restarts the measurement.
+        self.loudness.set_sample_rate(self.sample_rate);
+
         // Start WebSocket client (deferred from new() to avoid blocking DAW scans)
         self.ws_client.start();
 
@@ -307,6 +317,7 @@ impl Plugin for HardwaveAnalyser {
         self.buffer_left.clear();
         self.buffer_right.clear();
         self.samples_since_send = 0;
+        self.loudness.reset();
     }
 
     fn process(
@@ -342,8 +353,17 @@ impl Plugin for HardwaveAnalyser {
         let num_channels = buffer.channels();
         let num_samples = buffer.samples();
 
-        // Process each sample
         let channel_slices = buffer.as_slice();
+
+        // Loudness sees every sample of every buffer. A mono track has no
+        // right channel here, so BS.1770 weights it once; the copy into the
+        // right buffer below only feeds the spectrum and the scope.
+        if let Some(left) = channel_slices.first() {
+            self.loudness
+                .process(left, channel_slices.get(1).map(|right| &**right));
+        }
+
+        // Process each sample
         for sample_idx in 0..num_samples {
             // Get samples (handle mono by duplicating)
             let left = channel_slices[0][sample_idx];
@@ -454,7 +474,8 @@ impl HardwaveAnalyser {
             right_wave,
             left_true_peak,
             right_true_peak,
-        );
+        )
+        .with_loudness(&self.loudness.reading());
 
         // One shared allocation: the WS thread and the editor read the same
         // packet through Arcs instead of the audio thread deep-copying it.

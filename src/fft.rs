@@ -169,25 +169,19 @@ const TP_REFERENCE: [[f64; TP_TAPS]; TP_PHASES] = [
     ],
 ];
 
-/// The reference filter with every phase scaled to unity gain at DC. The
-/// published coefficients are rounded, which leaves the phase gains between
-/// about -0.24 dB and +0.01 dB; without this a constant signal would read
-/// slightly above its own sample value.
-const TP_FILTER: [[f32; TP_TAPS]; TP_PHASES] = normalise_phases(TP_REFERENCE);
+/// The reference filter as used at run time: the published taps, unscaled.
+/// BS.1770 defines true peak with these values; scaling each phase to unity
+/// DC gain would lift the two half-sample phases by about 0.24 dB and make an
+/// fs/4 sine read high.
+const TP_FILTER: [[f32; TP_TAPS]; TP_PHASES] = to_f32(TP_REFERENCE);
 
-const fn normalise_phases(reference: [[f64; TP_TAPS]; TP_PHASES]) -> [[f32; TP_TAPS]; TP_PHASES] {
+const fn to_f32(reference: [[f64; TP_TAPS]; TP_PHASES]) -> [[f32; TP_TAPS]; TP_PHASES] {
     let mut filter = [[0.0_f32; TP_TAPS]; TP_PHASES];
     let mut p = 0;
     while p < TP_PHASES {
-        let mut sum = 0.0;
         let mut k = 0;
         while k < TP_TAPS {
-            sum += reference[p][k];
-            k += 1;
-        }
-        let mut k = 0;
-        while k < TP_TAPS {
-            filter[p][k] = (reference[p][k] / sum) as f32;
+            filter[p][k] = reference[p][k] as f32;
             k += 1;
         }
         p += 1;
@@ -334,9 +328,12 @@ impl FftProcessor {
         let true_peak = peak.max(oversampled_peak(samples));
 
         let rms = (sum_squares / samples.len() as f32).sqrt();
-        let peak_db = (20.0 * (peak + 1e-10).log10()).clamp(-100.0, 0.0);
-        // A true peak above 0 dBTP is the over the meter exists to show (a 0 dBFS master can peak at +3 dBTP
-        // between samples), so it is not capped at 0 like the sample peak.
+        // Neither peak is capped at 0: floating-point audio goes above 0 dBFS
+        // (a hot bus before the limiter), and a 0 dBFS master can peak at
+        // +3 dBTP between samples. Those overs are what the meters exist to
+        // show. The +24 dB bound only keeps an infinite sample out of the
+        // JSON packet.
+        let peak_db = (20.0 * (peak + 1e-10).log10()).clamp(-100.0, 24.0);
         let true_peak_db = (20.0 * (true_peak + 1e-10).log10()).clamp(-100.0, 24.0);
 
         (peak_db, rms, true_peak_db)
@@ -439,25 +436,55 @@ mod tests {
         let (_, _, silence_db) = FftProcessor::calculate_levels(&[0.0; 1024]);
         assert_eq!(silence_db, -100.0);
 
+        // The published taps have DC gains between -0.24 dB and +0.014 dB per
+        // phase, so a constant reads at most a hair above its sample value.
         let (peak_db, _, dc_db) = FftProcessor::calculate_levels(&[0.5; 1024]);
-        assert!((dc_db - peak_db).abs() < 1e-4, "peak {peak_db} dc {dc_db}");
+        assert!(
+            dc_db >= peak_db && dc_db - peak_db < 0.02,
+            "peak {peak_db} dc {dc_db}"
+        );
 
         let (_, _, full_dc_db) = FftProcessor::calculate_levels(&[1.0; 1024]);
-        assert_eq!(full_dc_db, 0.0);
+        assert!((0.0..0.02).contains(&full_dc_db), "full dc {full_dc_db}");
 
         let (_, _, neg_dc_db) = FftProcessor::calculate_levels(&[-0.25; 1024]);
         assert!(
-            (neg_dc_db - (-12.04)).abs() < 0.01,
+            (neg_dc_db - (-12.04)).abs() < 0.03,
             "negative dc {neg_dc_db}"
         );
     }
 
     #[test]
-    fn test_true_peak_filter_phases_have_unity_dc_gain() {
-        for phase in &TP_FILTER {
-            let sum: f32 = phase.iter().sum();
-            assert!((sum - 1.0).abs() < 1e-6, "phase gain {sum}");
+    fn test_true_peak_uses_published_taps_unscaled() {
+        for (phase, reference) in TP_FILTER.iter().zip(&TP_REFERENCE) {
+            for (&tap, &published) in phase.iter().zip(reference) {
+                assert_eq!(tap, published as f32);
+            }
         }
+    }
+
+    #[test]
+    fn test_true_peak_of_0_dbtp_quarter_rate_sine() {
+        // fs/4, 45 degree offset, peaking at exactly 1.0 between the samples:
+        // 0 dBTP. BS.1770 allows +0.2/-0.4 dB here; scaling the half-sample
+        // phases to unity gain read +0.28.
+        let samples = sine(4096, 0.25, PI / 4.0, 1.0);
+        let (_, _, true_peak_db) = FftProcessor::calculate_levels(&samples);
+        assert!(
+            (-0.4..=0.2).contains(&true_peak_db),
+            "true peak {true_peak_db}"
+        );
+    }
+
+    #[test]
+    fn test_sample_peak_reads_above_0_dbfs() {
+        // Floating-point audio at 1.5 (+3.52 dBFS) must not be capped at 0.
+        let (peak_db, _, true_peak_db) = FftProcessor::calculate_levels(&[1.5, -1.5, 0.0, 1.5]);
+        assert!((peak_db - 3.52).abs() < 0.01, "sample peak {peak_db}");
+        assert!(true_peak_db >= peak_db);
+
+        let (peak_db, _, _) = FftProcessor::calculate_levels(&[f32::INFINITY, 0.0]);
+        assert!(peak_db.is_finite(), "sample peak {peak_db}");
     }
 
     #[test]
