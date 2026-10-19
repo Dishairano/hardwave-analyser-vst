@@ -538,7 +538,8 @@ mod tests {
 
         // It closes: packets stop.
         drop(editor);
-        thread::sleep(Duration::from_millis(50));
+        // A tick already under way may still deliver one packet.
+        thread::sleep(Duration::from_millis(200));
         plugin.packet_slot.lock().take();
         play(&mut plugin, 50);
         thread::sleep(Duration::from_millis(150));

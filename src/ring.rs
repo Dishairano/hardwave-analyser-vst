@@ -331,8 +331,19 @@ mod tests {
     /// slot. Positions are carried in the samples themselves.
     #[test]
     fn concurrent_reads_never_return_overwritten_frames() {
+        stress(64);
+    }
+
+    /// The same with a ring the reader mostly keeps up with, so most frames
+    /// go through the ordinary path.
+    #[test]
+    fn concurrent_reads_hand_over_every_frame_when_keeping_up() {
+        stress(1 << 16);
+    }
+
+    fn stress(capacity: usize) {
         const FRAMES: u32 = 2_000_000;
-        let (mut writer, mut reader) = sample_ring(64);
+        let (mut writer, mut reader) = sample_ring(capacity);
 
         let producer = std::thread::spawn(move || {
             let mut block_l = [0.0_f32; 37];
@@ -388,6 +399,6 @@ mod tests {
         assert_eq!(last, Some(FRAMES - 1));
         assert!(seen > 0);
         // Not asserted, but useful when this test is run with --nocapture.
-        println!("read {seen} of {FRAMES} frames, {restarts} restarts");
+        println!("ring of {capacity}: read {seen} of {FRAMES} frames, {restarts} restarts");
     }
 }
