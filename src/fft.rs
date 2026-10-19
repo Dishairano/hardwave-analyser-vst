@@ -6,6 +6,7 @@
 //! Includes true-peak metering via 4× oversampling.
 
 use rustfft::{num_complex::Complex, Fft, FftPlanner};
+use std::collections::VecDeque;
 use std::f32::consts::PI;
 use std::sync::Arc as StdArc;
 
@@ -189,27 +190,117 @@ const fn to_f32(reference: [[f64; TP_TAPS]; TP_PHASES]) -> [[f32; TP_TAPS]; TP_P
     filter
 }
 
-/// Largest absolute value of the 4× oversampled signal.
-///
-/// The caller passes the whole analysis window, so the filter history comes
-/// from the window itself: an output is only computed where all 12 input
-/// samples lie inside the slice. Nothing is carried between calls, and the
-/// few intervals at the very edges are covered by the sample peak and by
-/// the next, overlapping window.
-fn oversampled_peak(samples: &[f32]) -> f32 {
+/// Largest absolute value of the 4 oversampled points that end at the
+/// newest of `history`, which holds TP_TAPS samples, oldest first.
+#[inline]
+fn oversampled_max(history: &[f32]) -> f32 {
     let mut max = 0.0_f32;
-    for history in samples.windows(TP_TAPS) {
-        for phase in &TP_FILTER {
-            // history[TP_TAPS - 1] is the newest sample, paired with tap 0.
-            let y: f32 = phase
-                .iter()
-                .zip(history.iter().rev())
-                .map(|(h, x)| h * x)
-                .sum();
-            max = max.max(y.abs());
-        }
+    for phase in &TP_FILTER {
+        // history[TP_TAPS - 1] is the newest sample, paired with tap 0.
+        let y: f32 = phase
+            .iter()
+            .zip(history.iter().rev())
+            .map(|(h, x)| h * x)
+            .sum();
+        max = max.max(y.abs());
     }
     max
+}
+
+/// Largest absolute value of the 4× oversampled signal over a whole slice.
+///
+/// An output is only computed where all 12 input samples lie inside the
+/// slice. This is the full-window computation the meter used to run on every
+/// packet; [`TruePeakWindow`] now gets the same value one sample at a time,
+/// and the tests hold the two to each other.
+#[cfg(test)]
+fn oversampled_peak(samples: &[f32]) -> f32 {
+    samples
+        .windows(TP_TAPS)
+        .map(oversampled_max)
+        .fold(0.0_f32, f32::max)
+}
+
+/// True peak over the most recent `span` samples, kept up to date as samples
+/// arrive instead of being recomputed over the whole window for every packet.
+///
+/// The value is the one the full-window computation gives on the same
+/// samples: the largest 4× oversampled value at every position whose 12
+/// filter inputs all lie inside the window. Each sample is filtered once,
+/// when it arrives, and a queue of falling maxima (oldest first) keeps the
+/// window's maximum at its front, so reading it costs nothing however long
+/// the window is. Combine it with the sample peak via
+/// [`FftProcessor::levels`].
+pub struct TruePeakWindow {
+    span: usize,
+    /// The last TP_TAPS samples, stored twice so they always read as one
+    /// slice: `history[newest + 1..=newest + TP_TAPS]`, oldest first.
+    history: [f32; 2 * TP_TAPS],
+    newest: usize,
+    /// Samples pushed since the last clear.
+    pushed: u64,
+    /// (position of the newest filter input, level), levels strictly
+    /// falling from front to back.
+    maxima: VecDeque<(u64, f32)>,
+}
+
+impl TruePeakWindow {
+    /// Allocates the queue for the whole window up front.
+    pub fn new(span: usize) -> Self {
+        let span = span.max(TP_TAPS);
+        Self {
+            span,
+            history: [0.0; 2 * TP_TAPS],
+            newest: TP_TAPS - 1,
+            pushed: 0,
+            maxima: VecDeque::with_capacity(span),
+        }
+    }
+
+    /// Forget everything: the next sample starts a new window.
+    pub fn clear(&mut self) {
+        self.newest = TP_TAPS - 1;
+        self.pushed = 0;
+        self.maxima.clear();
+    }
+
+    /// Add samples, oldest first.
+    pub fn push(&mut self, mut samples: &[f32]) {
+        // Only the last `span` samples can end up in the window, and none of
+        // the filter outputs before them can either.
+        if samples.len() >= self.span {
+            self.clear();
+            samples = &samples[samples.len() - self.span..];
+        }
+        for &x in samples {
+            self.newest = (self.newest + 1) % TP_TAPS;
+            self.history[self.newest] = x;
+            self.history[self.newest + TP_TAPS] = x;
+            let position = self.pushed;
+            self.pushed += 1;
+
+            // An output counts while its oldest input is still in the window.
+            let oldest_kept = self.pushed.saturating_sub(self.span as u64) + (TP_TAPS as u64 - 1);
+            while self.maxima.front().is_some_and(|&(at, _)| at < oldest_kept) {
+                self.maxima.pop_front();
+            }
+
+            if self.pushed < TP_TAPS as u64 {
+                continue;
+            }
+            let level = oversampled_max(&self.history[self.newest + 1..=self.newest + TP_TAPS]);
+            while self.maxima.back().is_some_and(|&(_, l)| l <= level) {
+                self.maxima.pop_back();
+            }
+            self.maxima.push_back((position, level));
+        }
+    }
+
+    /// Largest oversampled value in the window, linear. 0 while the window
+    /// holds fewer than TP_TAPS samples.
+    pub fn peak(&self) -> f32 {
+        self.maxima.front().map_or(0.0, |&(_, level)| level)
+    }
 }
 
 /// FFT processor for a single channel
@@ -312,7 +403,15 @@ impl FftProcessor {
     /// 48-tap polyphase FIR, then the maximum absolute value. The sample peak
     /// is included, so the true peak never reads below it.
     /// Returns (peak_db, rms_linear, true_peak_db).
+    #[cfg(test)]
     pub fn calculate_levels(samples: &[f32]) -> (f32, f32, f32) {
+        Self::levels(samples, oversampled_peak(samples))
+    }
+
+    /// The same levels, with the oversampled part supplied by the caller:
+    /// `oversampled` is the largest 4× oversampled value over `samples`, as a
+    /// [`TruePeakWindow`] spanning the same samples reports it.
+    pub fn levels(samples: &[f32], oversampled: f32) -> (f32, f32, f32) {
         if samples.is_empty() {
             return (-100.0, 0.0, -100.0);
         }
@@ -325,7 +424,7 @@ impl FftProcessor {
             sum_squares += s * s;
         }
 
-        let true_peak = peak.max(oversampled_peak(samples));
+        let true_peak = peak.max(oversampled);
 
         let rms = (sum_squares / samples.len() as f32).sqrt();
         // Neither peak is capped at 0: floating-point audio goes above 0 dBFS
@@ -498,6 +597,125 @@ mod tests {
         samples[150] = f32::INFINITY;
         let (_, _, tp_db) = FftProcessor::calculate_levels(&samples);
         assert!(tp_db.is_finite());
+    }
+
+    /// Deterministic test audio: noise, a sine, and bursts of an fs/4 sine at
+    /// 45 degrees whose peaks fall between samples, so the oversampled value
+    /// and the sample peak differ and the maximum moves around.
+    fn true_peak_material(len: usize) -> Vec<f32> {
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        (0..len)
+            .map(|i| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                let noise = (state >> 40) as f32 / (1u64 << 23) as f32 - 1.0;
+                let sine = 0.4 * (2.0 * PI * 0.013 * i as f32).sin();
+                let burst = if (i / 3000) % 4 == 1 {
+                    let amp = 0.5 + 0.1 * ((i / 12_000) % 5) as f32;
+                    amp * (2.0 * PI * 0.25 * i as f32 + PI / 4.0).sin()
+                } else {
+                    0.0
+                };
+                0.2 * noise + sine + burst
+            })
+            .collect()
+    }
+
+    /// Feed `samples` to a window of `span` in chunks of the given sizes and,
+    /// after every chunk, compare it with the full computation over the same
+    /// last `span` samples. The two take the same filter outputs and the same
+    /// maximum, so they agree exactly, not just within a tolerance.
+    fn check_window_against_full_buffer(samples: &[f32], span: usize, chunks: &[usize]) {
+        let mut window = TruePeakWindow::new(span);
+        let mut fed = 0;
+        let mut sizes = chunks.iter().cycle();
+        let mut checks = 0;
+        while fed < samples.len() {
+            let n = (*sizes.next().unwrap()).min(samples.len() - fed);
+            window.push(&samples[fed..fed + n]);
+            fed += n;
+
+            let buffer = &samples[fed.saturating_sub(span)..fed];
+            assert_eq!(
+                window.peak().to_bits(),
+                oversampled_peak(buffer).to_bits(),
+                "after {fed} samples"
+            );
+            assert_eq!(
+                FftProcessor::levels(buffer, window.peak()),
+                FftProcessor::calculate_levels(buffer),
+                "after {fed} samples"
+            );
+            checks += 1;
+        }
+        assert!(checks > 0);
+    }
+
+    #[test]
+    fn test_true_peak_window_matches_full_buffer_in_host_sized_blocks() {
+        let samples = true_peak_material(5 * WELCH_MIN_SAMPLES);
+        check_window_against_full_buffer(&samples, WELCH_MIN_SAMPLES, &[256]);
+        check_window_against_full_buffer(&samples, WELCH_MIN_SAMPLES, &[1, 7, 333, 64, 2048]);
+    }
+
+    #[test]
+    fn test_true_peak_window_matches_full_buffer_with_big_reads() {
+        // A read longer than the window (the analysis thread catching up
+        // after an idle spell) takes the shortcut in push().
+        let samples = true_peak_material(6 * WELCH_MIN_SAMPLES);
+        check_window_against_full_buffer(&samples, WELCH_MIN_SAMPLES, &[30_000, 5, 20_480, 11]);
+    }
+
+    #[test]
+    fn test_true_peak_window_matches_full_buffer_on_a_short_window() {
+        // A short window makes the maxima leave the window constantly.
+        let samples = true_peak_material(20_000);
+        for span in [12, 13, 50, 257] {
+            check_window_against_full_buffer(&samples, span, &[1, 3, 17, 5, 64]);
+        }
+    }
+
+    #[test]
+    fn test_true_peak_window_start_and_clear() {
+        let mut window = TruePeakWindow::new(WELCH_MIN_SAMPLES);
+        // Fewer samples than the filter: no oversampled value yet, so the
+        // levels fall back to the sample peak, as the full computation does.
+        let few = [0.1, -0.2, 0.3];
+        window.push(&few);
+        assert_eq!(window.peak(), 0.0);
+        assert_eq!(
+            FftProcessor::levels(&few, window.peak()),
+            FftProcessor::calculate_levels(&few)
+        );
+
+        let loud = sine(4096, 0.25, PI / 4.0, 1.0);
+        window.push(&loud);
+        assert!(window.peak() > 0.9);
+
+        // After a clear the old peak is gone and the window starts again.
+        window.clear();
+        assert_eq!(window.peak(), 0.0);
+        let quiet = sine(4096, 0.01, 0.0, 0.1);
+        window.push(&quiet);
+        assert_eq!(window.peak().to_bits(), oversampled_peak(&quiet).to_bits());
+    }
+
+    #[test]
+    fn test_true_peak_window_non_finite_input() {
+        let mut samples = sine(30_000, 0.01, 0.0, 0.5);
+        samples[100] = f32::NAN;
+        samples[150] = f32::INFINITY;
+        samples[25_000] = f32::NAN;
+        let span = 4096;
+        let mut window = TruePeakWindow::new(span);
+        for (i, chunk) in samples.chunks(100).enumerate() {
+            window.push(chunk);
+            let end = (i + 1) * 100;
+            let buffer = &samples[end.saturating_sub(span)..end];
+            assert_eq!(window.peak().to_bits(), oversampled_peak(buffer).to_bits());
+            assert!(FftProcessor::levels(buffer, window.peak()).2.is_finite());
+        }
     }
 
     #[test]

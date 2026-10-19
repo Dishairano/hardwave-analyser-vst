@@ -17,6 +17,7 @@
 //! Ignored by default: it takes about a minute and a half and its numbers depend on the machine.
 
 use super::*;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -26,7 +27,7 @@ const SECONDS: usize = 10;
 const RUNS: usize = 3;
 
 /// The host side of `initialize()` and `process()`. The Analyser asks it for nothing.
-struct Host;
+pub(crate) struct Host;
 
 impl InitContext<HardwaveAnalyser> for Host {
     fn plugin_api(&self) -> PluginApi {
@@ -52,6 +53,67 @@ impl ProcessContext<HardwaveAnalyser> for Host {
     fn send_event(&mut self, _event: PluginNoteEvent<HardwaveAnalyser>) {}
     fn set_latency_samples(&self, _samples: u32) {}
     fn set_current_voice_capacity(&self, _capacity: u32) {}
+}
+
+/// A plug-in whose refresh-rate and port parameters start at the given values, as if restored
+/// from a project.
+pub(crate) fn plugin_with(refresh_rate: i32, port: i32) -> HardwaveAnalyser {
+    let params = HardwaveAnalyserParams {
+        refresh_rate: IntParam::new(
+            "Refresh Rate",
+            refresh_rate,
+            IntRange::Linear { min: 60, max: 144 },
+        ),
+        port: IntParam::new(
+            "Port",
+            port,
+            IntRange::Linear {
+                min: 1024,
+                max: 65535,
+            },
+        ),
+        ..Default::default()
+    };
+    HardwaveAnalyser {
+        params: Arc::new(params),
+        ..Default::default()
+    }
+}
+
+/// `initialize()` and `reset()` the way a host activates the plug-in: stereo at 48 kHz.
+pub(crate) fn activate(plugin: &mut HardwaveAnalyser) {
+    let layout = HardwaveAnalyser::AUDIO_IO_LAYOUTS[0];
+    let config = BufferConfig {
+        sample_rate: SAMPLE_RATE,
+        min_buffer_size: None,
+        max_buffer_size: BLOCK as u32,
+        process_mode: ProcessMode::Realtime,
+    };
+    assert!(plugin.initialize(&layout, &config, &mut Host));
+    plugin.reset();
+}
+
+/// Run `f` with `left` and `right` set up as the host's buffer for one block.
+pub(crate) fn with_block<R>(
+    left: &mut [f32],
+    right: &mut [f32],
+    f: impl FnOnce(&mut Buffer, &mut AuxiliaryBuffers) -> R,
+) -> R {
+    let len = left.len().min(right.len());
+    let mut buffer = Buffer::default();
+    // SAFETY: the slices point into `left` and `right`, which outlive `buffer`.
+    unsafe {
+        buffer.set_slices(len, |slices| {
+            slices.clear();
+            slices.push(&mut left[..len]);
+            slices.push(&mut right[..len]);
+        });
+    }
+    let mut aux = AuxiliaryBuffers {
+        inputs: &mut [],
+        outputs: &mut [],
+    };
+    f(&mut buffer, &mut aux)
 }
 
 /// 10 s of stereo: white noise at about -15 dBFS RMS in each channel (different noise left and
@@ -99,16 +161,18 @@ const CASES: [Case; 3] = [
     },
 ];
 
-/// Stands in for the plug-in window: takes the latest packet from the slot at the refresh rate
-/// and turns it into JSON, as the Linux and macOS editors do.
+/// Stands in for the plug-in window: registers as open, the way the editor's `spawn()` does, and
+/// takes the latest packet from the slot at the refresh rate and turns it into JSON, as the Linux
+/// and macOS editors do.
 struct FakeEditor {
-    running: Arc<std::sync::atomic::AtomicBool>,
+    running: Arc<AtomicBool>,
     thread: Option<thread::JoinHandle<()>>,
+    _open: analysis::EditorOpen,
 }
 
 impl FakeEditor {
     fn open(plugin: &HardwaveAnalyser, refresh_rate: i32) -> Self {
-        let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let running = Arc::new(AtomicBool::new(true));
         let slot = Arc::clone(&plugin.packet_slot);
         let thread = thread::spawn({
             let running = Arc::clone(&running);
@@ -125,6 +189,7 @@ impl FakeEditor {
         Self {
             running,
             thread: Some(thread),
+            _open: plugin.consumers.editor_opened(),
         }
     }
 }
@@ -175,7 +240,7 @@ fn analysis_thread_cpu() -> Option<Duration> {
     let tasks = std::fs::read_dir("/proc/self/task").ok()?;
     for task in tasks.flatten() {
         let comm = std::fs::read_to_string(task.path().join("comm")).unwrap_or_default();
-        if comm.trim() == "hw-analysis" {
+        if comm.trim() == analysis::THREAD_NAME {
             let schedstat = std::fs::read_to_string(task.path().join("schedstat")).ok()?;
             let nanos: u64 = schedstat.split_whitespace().next()?.parse().ok()?;
             return Some(Duration::from_nanos(nanos));
@@ -194,24 +259,9 @@ struct Run {
 }
 
 fn run(case: &Case, left: &[f32], right: &[f32], overhead: Duration) -> Run {
-    let mut params = HardwaveAnalyserParams::default();
-    params.refresh_rate = IntParam::new(
-        "Refresh Rate",
-        case.refresh_rate,
-        IntRange::Linear { min: 60, max: 144 },
-    );
-
-    let mut plugin = HardwaveAnalyser::default();
-    plugin.params = Arc::new(params);
-    let layout = HardwaveAnalyser::AUDIO_IO_LAYOUTS[0];
-    let config = BufferConfig {
-        sample_rate: SAMPLE_RATE,
-        min_buffer_size: None,
-        max_buffer_size: BLOCK as u32,
-        process_mode: ProcessMode::Realtime,
-    };
-    assert!(plugin.initialize(&layout, &config, &mut Host));
-    plugin.reset();
+    // Nothing listens on this port here: "no Suite".
+    let mut plugin = plugin_with(case.refresh_rate, 9847);
+    activate(&mut plugin);
     let editor = case
         .editor_open
         .then(|| FakeEditor::open(&plugin, case.refresh_rate));
@@ -231,22 +281,15 @@ fn run(case: &Case, left: &[f32], right: &[f32], overhead: Duration) -> Run {
 
         block_left[..l.len()].copy_from_slice(l);
         block_right[..r.len()].copy_from_slice(r);
-        let mut buffer = Buffer::default();
-        unsafe {
-            buffer.set_slices(l.len(), |slices| {
-                slices.clear();
-                slices.push(&mut block_left[..l.len()]);
-                slices.push(&mut block_right[..r.len()]);
-            });
-        }
-        let mut aux = AuxiliaryBuffers {
-            inputs: &mut [],
-            outputs: &mut [],
-        };
-
-        let t = thread_cpu();
-        plugin.process(&mut buffer, &mut aux, &mut Host);
-        let dt = thread_cpu().saturating_sub(t).saturating_sub(overhead);
+        let dt = with_block(
+            &mut block_left[..l.len()],
+            &mut block_right[..r.len()],
+            |buffer, aux| {
+                let t = thread_cpu();
+                plugin.process(buffer, aux, &mut Host);
+                thread_cpu().saturating_sub(t).saturating_sub(overhead)
+            },
+        );
 
         busy += dt;
         worst_block = worst_block.max(dt);
