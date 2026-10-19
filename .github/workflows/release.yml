@@ -63,6 +63,18 @@ jobs:
       - name: Build
         run: cargo xtask bundle hardwave-analyser --release
 
+      # A release must never ship a Windows build that imports the Visual C++ runtime.
+      - name: No Visual C++ runtime imports
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem target/bundled -Recurse -File | Where-Object { $_.Extension -in '.clap', '.vst3' }
+          if (-not $files) { throw 'no Windows plug-in found in target/bundled' }
+          $bad = foreach ($f in $files) {
+            $text = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($f.FullName))
+            foreach ($m in [regex]::Matches($text, '(?i)(vcruntime\d+(_\d)?|msvcp\d+|concrt\d+|vcomp\d+)\.dll')) { "$($f.Name) imports $($m.Value)" }
+          }
+          if ($bad) { $bad | Sort-Object -Unique; throw 'a Windows build imports the Visual C++ runtime' }
+
       - name: Package
         run: |
           cd target/bundled

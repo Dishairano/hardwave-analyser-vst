@@ -4,3 +4,9 @@ xtask = "run --package xtask --release --"
 [target.x86_64-pc-windows-gnu]
 linker = "x86_64-w64-mingw32-gcc"
 rustflags = ["-C", "target-feature=+crt-static", "-C", "link-args=-Wl,--subsystem,windows"]
+
+# Link the C runtime statically on Windows (MSVC, what the release builds with). A DLL built against the
+# dynamic runtime imports VCRUNTIME140.dll, which is not part of Windows, so it fails to load (error 126) on
+# a computer without the Visual C++ Redistributable. Analyser 1.0.30 shipped that way.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
