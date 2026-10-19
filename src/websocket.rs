@@ -10,6 +10,7 @@ use std::time::Duration;
 use tungstenite::protocol::WebSocket;
 use tungstenite::{client::IntoClientRequest, Message};
 
+use crate::analysis::Consumers;
 use crate::protocol::AudioPacket;
 
 /// WebSocket client that runs in a background thread
@@ -29,28 +30,55 @@ pub struct WebSocketClient {
 
     /// Current server port
     server_port: Arc<Mutex<u16>>,
+
+    /// Told when the Suite connects and disconnects: the analysis only runs
+    /// while someone reads it.
+    consumers: Arc<Consumers>,
+}
+
+/// The analysis thread's handle on the client: hand it packets and point it
+/// at the port the parameter names.
+#[derive(Clone)]
+pub struct SuiteLink {
+    packet_sender: Sender<Arc<AudioPacket>>,
+    server_port: Arc<Mutex<u16>>,
+}
+
+impl SuiteLink {
+    /// Send an audio packet (non-blocking).
+    pub fn send(&self, packet: Arc<AudioPacket>) {
+        let _ = self.packet_sender.try_send(packet);
+    }
+
+    /// Update the server port
+    pub fn set_port(&self, port: i32) {
+        let mut p = self.server_port.lock();
+        *p = port as u16;
+    }
 }
 
 impl WebSocketClient {
     /// Create a new WebSocket client. Does NOT start the connection thread yet —
     /// call `start()` after the plugin is initialised to avoid blocking DAW
     /// plugin scans.
-    pub fn new() -> Self {
+    pub fn new(consumers: Arc<Consumers>) -> Self {
         Self {
             packet_sender: None,
             shutdown: Arc::new(AtomicBool::new(false)),
             shutdown_tx: None,
             thread_handle: None,
             server_port: Arc::new(Mutex::new(9847u16)),
+            consumers,
         }
     }
 
-    /// Start the background connection thread. Safe to call multiple times —
-    /// only the first call spawns the thread.
-    pub fn start(&mut self) {
+    /// Start the background connection thread on `port`. Safe to call
+    /// multiple times: only the first call spawns the thread.
+    pub fn start(&mut self, port: i32) {
         if self.thread_handle.is_some() {
             return;
         }
+        *self.server_port.lock() = port as u16;
 
         let (packet_sender, packet_receiver) = bounded::<Arc<AudioPacket>>(32);
         self.packet_sender = Some(packet_sender);
@@ -60,23 +88,26 @@ impl WebSocketClient {
 
         let shutdown_clone = Arc::clone(&self.shutdown);
         let port_clone = Arc::clone(&self.server_port);
+        let consumers = Arc::clone(&self.consumers);
 
         self.thread_handle = Some(thread::spawn(move || {
-            Self::connection_loop(packet_receiver, shutdown_rx, shutdown_clone, port_clone);
+            Self::connection_loop(
+                packet_receiver,
+                shutdown_rx,
+                shutdown_clone,
+                port_clone,
+                &consumers,
+            );
+            consumers.set_suite_connected(false);
         }));
     }
 
-    /// Update the server port
-    pub fn set_port(&self, port: i32) {
-        let mut p = self.server_port.lock();
-        *p = port as u16;
-    }
-
-    /// Send an audio packet (non-blocking). No-op before start() is called.
-    pub fn send(&self, packet: Arc<AudioPacket>) {
-        if let Some(sender) = &self.packet_sender {
-            let _ = sender.try_send(packet);
-        }
+    /// The handle the analysis thread sends through. None before start().
+    pub fn link(&self) -> Option<SuiteLink> {
+        Some(SuiteLink {
+            packet_sender: self.packet_sender.clone()?,
+            server_port: Arc::clone(&self.server_port),
+        })
     }
 
     /// Background connection loop
@@ -85,6 +116,7 @@ impl WebSocketClient {
         shutdown_rx: Receiver<()>,
         shutdown: Arc<AtomicBool>,
         server_port: Arc<Mutex<u16>>,
+        consumers: &Consumers,
     ) {
         let mut reconnect_delay = Duration::from_millis(100);
         let max_reconnect_delay = Duration::from_secs(5);
@@ -94,7 +126,9 @@ impl WebSocketClient {
 
             if let Ok(mut socket) = Self::try_connect(port) {
                 reconnect_delay = Duration::from_millis(100);
+                consumers.set_suite_connected(true);
                 Self::handle_connection(&mut socket, &receiver, &shutdown, &server_port, port);
+                consumers.set_suite_connected(false);
                 // If the port changed, reconnect immediately without backoff.
                 if *server_port.lock() != port {
                     reconnect_delay = Duration::from_millis(100);
@@ -190,12 +224,6 @@ impl WebSocketClient {
             // Small sleep to avoid busy-waiting
             thread::sleep(Duration::from_millis(1));
         }
-    }
-}
-
-impl Default for WebSocketClient {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

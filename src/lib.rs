@@ -17,7 +17,10 @@
 #![allow(unknown_lints)]
 #![allow(semicolon_in_expressions_from_macros)]
 #![allow(semicolon_in_expressions_from_non_local_macros)]
+mod analysis;
 mod auth;
+#[cfg(test)]
+mod bench;
 #[macro_use]
 pub mod diag;
 #[cfg(feature = "gui")]
@@ -26,19 +29,22 @@ mod fft;
 mod loudness;
 mod params;
 mod protocol;
+mod ring;
 mod websocket;
 
 use nih_plug::prelude::*;
 use parking_lot::Mutex;
-use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU32, Ordering};
+#[cfg(feature = "gui")]
+use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
 use std::time::Instant;
 
-use fft::{FftProcessor, FFT_SIZE, WELCH_MIN_SAMPLES};
+use analysis::{
+    Analysis, AnalysisSetup, AnalysisThread, Consumers, LoudnessReader, LoudnessWriter, PacketSlot,
+};
 use loudness::LoudnessMeter;
 use params::HardwaveAnalyserParams;
-use protocol::AudioPacket;
+use ring::RingWriter;
 use websocket::WebSocketClient;
 
 /// Hardwave data directory (shared between plugin and Suite).
@@ -146,45 +152,39 @@ pub struct HardwaveAnalyser {
     /// WebSocket client for streaming to the desktop app
     ws_client: WebSocketClient,
 
-    /// Shared slot for the latest FFT packet (written by audio thread, read by
-    /// editor). Arc'd so the audio thread never deep-copies the ~37 KB packet.
-    packet_slot: Arc<Mutex<Option<std::sync::Arc<AudioPacket>>>>,
+    /// Shared slot for the latest FFT packet (written by the analysis thread,
+    /// read by the editor). Arc'd so nobody deep-copies the ~37 KB packet.
+    packet_slot: PacketSlot,
 
     // Editor is constructed fresh per `editor()` call — see comment on the
     // `editor()` impl below for why the previous one-shot Option pattern was
     // a re-open bug, not an optimisation.
-    /// FFT processor for left channel
-    fft_left: FftProcessor,
+    /// Open editor windows and the Suite connection. The analysis thread
+    /// only works while one of them is there.
+    consumers: Arc<Consumers>,
 
-    /// FFT processor for right channel
-    fft_right: FftProcessor,
+    /// The audio thread's end of the sample hand-off to the analysis thread.
+    /// None until `initialize()`: a host that calls `process()` first still
+    /// gets audio through and loudness measured.
+    ring: Option<RingWriter>,
 
-    /// Sample buffer for left channel
-    buffer_left: VecDeque<f32>,
-
-    /// Sample buffer for right channel
-    buffer_right: VecDeque<f32>,
+    /// Spectrum, levels and scope, worked out off the audio thread. Runs
+    /// between `initialize()` and `deactivate()`.
+    analysis: Option<AnalysisThread>,
 
     /// BS.1770 / EBU R128 loudness, measured on every sample
     loudness: LoudnessMeter,
 
+    /// Where `process()` leaves the latest loudness reading for the analysis
+    /// thread, and the analysis thread's end of it.
+    loudness_out: LoudnessWriter,
+    loudness_in: LoudnessReader,
+
     /// Current sample rate
     sample_rate: f32,
 
-    /// Samples since last FFT send
-    samples_since_send: usize,
-
-    /// Samples between FFT sends
-    samples_per_send: usize,
-
     /// Plugin start time for timestamps
     start_time: Instant,
-
-    /// Last port value (for detecting changes)
-    last_port: i32,
-
-    /// Last refresh rate value (for detecting changes)
-    last_refresh_rate: i32,
 
     /// Shared interval (ms) between FFT sends, read by the editor thread for its sleep duration
     #[cfg(feature = "gui")]
@@ -196,27 +196,25 @@ impl Default for HardwaveAnalyser {
         install_crash_handler();
         crash_reporter::install("analyser");
 
-        let packet_slot: Arc<Mutex<Option<std::sync::Arc<AudioPacket>>>> =
-            Arc::new(Mutex::new(None));
+        let packet_slot: PacketSlot = Arc::new(Mutex::new(None));
+        let consumers = Consumers::new();
+        let (loudness_out, loudness_in) = analysis::loudness_handoff();
 
         #[cfg(feature = "gui")]
         let refresh_interval_ms = Arc::new(AtomicU32::new(16)); // 1000 / 60Hz
 
         Self {
             params: Arc::new(HardwaveAnalyserParams::default()),
-            ws_client: WebSocketClient::new(),
-            packet_slot: Arc::clone(&packet_slot),
-            fft_left: FftProcessor::new(),
-            fft_right: FftProcessor::new(),
-            buffer_left: VecDeque::with_capacity(WELCH_MIN_SAMPLES),
-            buffer_right: VecDeque::with_capacity(WELCH_MIN_SAMPLES),
+            ws_client: WebSocketClient::new(Arc::clone(&consumers)),
+            packet_slot,
+            consumers,
+            ring: None,
+            analysis: None,
             loudness: LoudnessMeter::new(48000.0),
+            loudness_out,
+            loudness_in,
             sample_rate: 48000.0,
-            samples_since_send: 0,
-            samples_per_send: 800, // 48000 / 60 = 800 samples for 60Hz default
             start_time: Instant::now(),
-            last_port: 9847,
-            last_refresh_rate: 60,
             #[cfg(feature = "gui")]
             refresh_interval_ms,
         }
@@ -269,6 +267,7 @@ impl Plugin for HardwaveAnalyser {
                 Arc::clone(&self.packet_slot),
                 Arc::clone(&self.refresh_interval_ms),
                 Arc::clone(&self.params),
+                Arc::clone(&self.consumers),
             )) as Box<dyn Editor>)
         }
         #[cfg(not(feature = "gui"))]
@@ -291,33 +290,46 @@ impl Plugin for HardwaveAnalyser {
         ));
 
         self.sample_rate = buffer_config.sample_rate;
-        let refresh_rate = self.params.refresh_rate.value() as f32;
-        self.samples_per_send = (self.sample_rate / refresh_rate) as usize;
-        self.last_refresh_rate = self.params.refresh_rate.value();
-
-        // Clear buffers
-        self.buffer_left.clear();
-        self.buffer_right.clear();
 
         // Redesign the K-weighting for this rate and size the 3 s window
         // (allocates here, never in process). Restarts the measurement.
         self.loudness.set_sample_rate(self.sample_rate);
 
         // Start WebSocket client (deferred from new() to avoid blocking DAW scans)
-        self.ws_client.start();
+        self.ws_client.start(self.params.port.value());
 
-        // Set initial port
-        self.ws_client.set_port(self.params.port.value());
-        self.last_port = self.params.port.value();
+        // A host may initialize again without deactivating in between (a new
+        // sample rate): stop the old analysis thread before starting one for
+        // this rate, so there is never more than one.
+        self.analysis = None;
+        let (ring, ring_reader) = ring::sample_ring(analysis::RING_FRAMES);
+        self.ring = Some(ring);
+        self.analysis = AnalysisThread::start(Analysis::new(AnalysisSetup {
+            params: Arc::clone(&self.params),
+            consumers: Arc::clone(&self.consumers),
+            ring: ring_reader,
+            loudness: self.loudness_in.clone(),
+            packet_slot: Arc::clone(&self.packet_slot),
+            suite: self.ws_client.link(),
+            #[cfg(feature = "gui")]
+            refresh_interval_ms: Arc::clone(&self.refresh_interval_ms),
+            sample_rate: self.sample_rate,
+            start_time: self.start_time,
+        }));
 
         true
     }
 
     fn reset(&mut self) {
-        self.buffer_left.clear();
-        self.buffer_right.clear();
-        self.samples_since_send = 0;
         self.loudness.reset();
+        if let Some(ring) = &self.ring {
+            ring.mark_reset();
+        }
+    }
+
+    fn deactivate(&mut self) {
+        // Joins the thread, so nothing of ours runs once the host unloads us.
+        self.analysis = None;
     }
 
     fn process(
@@ -326,77 +338,31 @@ impl Plugin for HardwaveAnalyser {
         _aux: &mut AuxiliaryBuffers,
         _context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
-        // Check if port changed
-        let current_port = self.params.port.value();
-        if current_port != self.last_port {
-            self.ws_client.set_port(current_port);
-            self.last_port = current_port;
-        }
-
-        // Check if refresh rate changed
-        let current_refresh_rate = self.params.refresh_rate.value();
-        if current_refresh_rate != self.last_refresh_rate {
-            self.samples_per_send = (self.sample_rate / current_refresh_rate as f32) as usize;
-            self.last_refresh_rate = current_refresh_rate;
-            #[cfg(feature = "gui")]
-            self.refresh_interval_ms.store(
-                (1000.0 / current_refresh_rate as f32) as u32,
-                Ordering::Relaxed,
-            );
-        }
-
         // Skip processing if disabled
         if !self.params.enabled.value() {
             return ProcessStatus::Normal;
         }
 
-        let num_channels = buffer.channels();
-        let num_samples = buffer.samples();
-
         let channel_slices = buffer.as_slice();
 
-        // Loudness sees every sample of every buffer. A mono track has no
-        // right channel here, so BS.1770 weights it once; the copy into the
-        // right buffer below only feeds the spectrum and the scope.
         if let Some(left) = channel_slices.first() {
-            self.loudness
-                .process(left, channel_slices.get(1).map(|right| &**right));
-        }
+            let left: &[f32] = left;
+            let right = channel_slices.get(1).map(|right| &**right);
 
-        // Process each sample
-        for sample_idx in 0..num_samples {
-            // Get samples (handle mono by duplicating)
-            let left = channel_slices[0][sample_idx];
-            let right = if num_channels > 1 {
-                channel_slices[1][sample_idx]
-            } else {
-                left
-            };
+            // Loudness sees every sample of every buffer. A mono track has no
+            // right channel here, so BS.1770 weights it once.
+            self.loudness.process(left, right);
+            // Before the samples go into the ring, so the analysis thread
+            // never sees samples newer than the reading it sends with them.
+            self.loudness_out.publish(&self.loudness.reading());
 
-            // Add to ring buffers
-            self.buffer_left.push_back(left);
-            self.buffer_right.push_back(right);
-
-            // Keep buffer sized for full Welch's-method coverage.
-            // (FFT_SIZE + (WELCH_SEGMENTS-1) * FFT_SIZE/2 = 20480 samples at 8192 FFT)
-            // The previous cap of FFT_SIZE * 2 silently degraded to single-segment Welch.
-            if self.buffer_left.len() > WELCH_MIN_SAMPLES {
-                self.buffer_left.pop_front();
-                self.buffer_right.pop_front();
+            // Everything else the window shows is worked out on the analysis
+            // thread; this only copies the block across, without waiting or
+            // allocating. A mono track feeds the same samples to both sides
+            // of the spectrum and the scope.
+            if let Some(ring) = &mut self.ring {
+                ring.push(left, right.unwrap_or(left));
             }
-
-            self.samples_since_send += 1;
-        }
-
-        // Send FFT data at the configured refresh rate (60–144 Hz param)
-        if self.samples_since_send >= self.samples_per_send && self.buffer_left.len() >= FFT_SIZE {
-            // Catch panics so a crash in FFT/WS code doesn't take down the DAW.
-            // The panic hook still writes the crash log before we get here.
-            let wrapper = std::panic::AssertUnwindSafe(|| self.send_fft_data());
-            if std::panic::catch_unwind(wrapper).is_err() {
-                Self::debug_log("PANIC caught in send_fft_data — see crash log");
-            }
-            self.samples_since_send = 0;
         }
 
         // Pass through audio unchanged
@@ -425,66 +391,6 @@ impl HardwaveAnalyser {
             let _ = writeln!(f, "[{}] [lib] {}", now, msg);
         }
     }
-
-    /// Process and send FFT data
-    fn send_fft_data(&mut self) {
-        // Update window function if changed
-        let wf = fft::WindowFn::from(self.params.window_fn.value());
-        self.fft_left.set_window_fn(wf);
-        self.fft_right.set_window_fn(wf);
-
-        // Make VecDeque storage contiguous so we can take a slice.
-        let left_slice = self.buffer_left.make_contiguous();
-        let left_bins = self.fft_left.process(left_slice, self.sample_rate);
-        let (left_peak, left_rms, left_true_peak) = FftProcessor::calculate_levels(left_slice);
-
-        let right_slice = self.buffer_right.make_contiguous();
-        let right_bins = self.fft_right.process(right_slice, self.sample_rate);
-        let (right_peak, right_rms, right_true_peak) = FftProcessor::calculate_levels(right_slice);
-
-        // Create and send packet
-        let timestamp_ms = self.start_time.elapsed().as_millis() as u64;
-
-        // Extract oscilloscope waveform: last WAVE_SIZE samples.
-        // buffer_left/right are already contiguous after make_contiguous() above.
-        use protocol::WAVE_SIZE;
-        let left_slice = self.buffer_left.as_slices().0;
-        let left_wave = if left_slice.len() >= WAVE_SIZE {
-            left_slice[left_slice.len() - WAVE_SIZE..].to_vec()
-        } else {
-            vec![0.0_f32; WAVE_SIZE]
-        };
-        let right_slice = self.buffer_right.as_slices().0;
-        let right_wave = if right_slice.len() >= WAVE_SIZE {
-            right_slice[right_slice.len() - WAVE_SIZE..].to_vec()
-        } else {
-            vec![0.0_f32; WAVE_SIZE]
-        };
-
-        let packet = AudioPacket::new_fft(
-            self.sample_rate as u32,
-            timestamp_ms,
-            left_bins,
-            right_bins,
-            left_peak,
-            right_peak,
-            left_rms,
-            right_rms,
-            left_wave,
-            right_wave,
-            left_true_peak,
-            right_true_peak,
-        )
-        .with_loudness(&self.loudness.reading());
-
-        // One shared allocation: the WS thread and the editor read the same
-        // packet through Arcs instead of the audio thread deep-copying it.
-        let packet = std::sync::Arc::new(packet);
-        self.ws_client.send(std::sync::Arc::clone(&packet));
-
-        // Write latest packet to shared slot (editor thread takes it when ready)
-        *self.packet_slot.lock() = Some(packet);
-    }
 }
 
 impl ClapPlugin for HardwaveAnalyser {
@@ -511,3 +417,174 @@ impl Vst3Plugin for HardwaveAnalyser {
 
 nih_export_clap!(HardwaveAnalyser);
 nih_export_vst3!(HardwaveAnalyser);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bench::{activate, plugin_with, with_block, Host};
+    use crate::protocol::{NUM_BINS, PACKET_TYPE_FFT};
+    use std::thread;
+    use std::time::Duration;
+
+    /// Analysis threads alive in this process, counted by name in /proc.
+    /// None where there is no /proc to count them in.
+    fn analysis_threads() -> Option<usize> {
+        let tasks = std::fs::read_dir("/proc/self/task").ok()?;
+        Some(
+            tasks
+                .flatten()
+                .filter(|task| {
+                    std::fs::read_to_string(task.path().join("comm"))
+                        .is_ok_and(|comm| comm.trim() == analysis::THREAD_NAME)
+                })
+                .count(),
+        )
+    }
+
+    /// A joined thread can stay listed for a moment while the kernel
+    /// finishes with it.
+    fn assert_analysis_threads(expected: usize) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let Some(count) = analysis_threads() else {
+                return;
+            };
+            if count == expected {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{count} analysis threads, expected {expected}"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// A loopback port nothing listens on.
+    fn unused_port() -> i32 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        i32::from(listener.local_addr().unwrap().port())
+    }
+
+    /// Play `blocks` blocks of a sine, as fast as the plug-in takes them.
+    fn play(plugin: &mut HardwaveAnalyser, blocks: usize) {
+        let mut left = [0.0_f32; 256];
+        let mut right = [0.0_f32; 256];
+        for _ in 0..blocks {
+            for (i, (l, r)) in left.iter_mut().zip(right.iter_mut()).enumerate() {
+                *l = 0.5 * (i as f32 * 0.05).sin();
+                *r = -*l;
+            }
+            with_block(&mut left, &mut right, |buffer, aux| {
+                plugin.process(buffer, aux, &mut Host)
+            });
+        }
+    }
+
+    /// Play audio in real time until `done` holds, for at most `limit`.
+    fn play_until(
+        plugin: &mut HardwaveAnalyser,
+        limit: Duration,
+        mut done: impl FnMut(&HardwaveAnalyser) -> bool,
+    ) -> bool {
+        let deadline = Instant::now() + limit;
+        while Instant::now() < deadline {
+            play(plugin, 1);
+            if done(plugin) {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        false
+    }
+
+    /// One test, not several: the thread counts would see each other's
+    /// plug-ins if they ran in parallel.
+    #[test]
+    fn analysis_runs_only_while_someone_looks_and_never_outlives_the_plugin() {
+        let mut plugin = plugin_with(144, unused_port());
+
+        // A host that calls process() before initialize(): audio passes and
+        // loudness is measured, nothing else happens and nothing breaks.
+        play(&mut plugin, 4);
+        assert!(plugin.analysis.is_none() && plugin.ring.is_none());
+        assert_analysis_threads(0);
+
+        activate(&mut plugin);
+        assert_analysis_threads(1);
+        // Initialized again without a deactivate in between (a new sample
+        // rate): still exactly one thread.
+        activate(&mut plugin);
+        assert_analysis_threads(1);
+
+        // Nobody looking: no analysis, no packets.
+        play(&mut plugin, 200);
+        thread::sleep(Duration::from_millis(150));
+        play(&mut plugin, 20);
+        thread::sleep(Duration::from_millis(50));
+        assert!(plugin.packet_slot.lock().is_none());
+
+        // An editor opens: packets at once, with a full window of the audio
+        // that played while nobody looked.
+        let editor = plugin.consumers.editor_opened();
+        assert!(play_until(&mut plugin, Duration::from_secs(3), |p| p
+            .packet_slot
+            .lock()
+            .is_some()));
+        let packet = plugin.packet_slot.lock().take().unwrap();
+        assert_eq!(packet.packet_type, PACKET_TYPE_FFT);
+        assert_eq!(packet.left_bins.len(), NUM_BINS);
+        assert!(packet.left_peak > -7.0 && packet.left_peak < -5.0);
+
+        // It closes: packets stop.
+        drop(editor);
+        // A tick already under way may still deliver one packet.
+        thread::sleep(Duration::from_millis(200));
+        plugin.packet_slot.lock().take();
+        play(&mut plugin, 50);
+        thread::sleep(Duration::from_millis(150));
+        assert!(plugin.packet_slot.lock().is_none());
+
+        // Deactivate joins the thread; the next activation starts a new one;
+        // dropping the plug-in leaves none behind.
+        plugin.deactivate();
+        assert!(plugin.analysis.is_none());
+        assert_analysis_threads(0);
+        activate(&mut plugin);
+        assert_analysis_threads(1);
+        drop(plugin);
+        assert_analysis_threads(0);
+
+        // The Suite connecting is enough to start the analysis, and it gets
+        // FFT packets over the same WebSocket as before.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = i32::from(listener.local_addr().unwrap().port());
+        let suite = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut socket = tungstenite::accept(stream).unwrap();
+            loop {
+                match socket.read().expect("the plug-in keeps sending") {
+                    tungstenite::Message::Binary(data) => {
+                        let packet: protocol::AudioPacket = bincode::deserialize(&data).unwrap();
+                        if packet.packet_type == PACKET_TYPE_FFT {
+                            return packet;
+                        }
+                    }
+                    _ => continue,
+                }
+            }
+        });
+        let mut plugin = plugin_with(144, port);
+        activate(&mut plugin);
+        assert!(play_until(&mut plugin, Duration::from_secs(5), |_| suite.is_finished()));
+        let packet = suite.join().unwrap();
+        assert_eq!(packet.sample_rate, 48_000);
+        assert_eq!(packet.right_bins.len(), NUM_BINS);
+        assert_eq!(packet.right_wave.len(), protocol::WAVE_SIZE);
+        drop(plugin);
+        assert_analysis_threads(0);
+    }
+}

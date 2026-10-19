@@ -14,6 +14,7 @@ use std::thread;
 use std::time::Duration;
 use wry::raw_window_handle as rwh06;
 
+use crate::analysis::{Consumers, EditorOpen};
 use crate::auth;
 use crate::params::HardwaveAnalyserParams;
 use crate::protocol::AudioPacket;
@@ -292,6 +293,9 @@ pub struct HardwaveAnalyserEditor {
     /// Shared with the Plugin struct via Arc so nih-plug's DAW save/load
     /// lifecycle keeps preset_state in sync automatically.
     params: Arc<HardwaveAnalyserParams>,
+    /// Told while a window is open, so the plug-in only analyses audio
+    /// when someone can see it.
+    consumers: Arc<Consumers>,
     /// The WebView2 pre-warm thread, kept so it can be joined.
     ///
     /// Detaching it is what made the CLAP validator crash this plug-in on
@@ -331,6 +335,7 @@ impl HardwaveAnalyserEditor {
         packet_slot: Arc<Mutex<Option<Arc<AudioPacket>>>>,
         refresh_interval_ms: Arc<AtomicU32>,
         params: Arc<HardwaveAnalyserParams>,
+        consumers: Arc<Consumers>,
     ) -> Self {
         let token = auth::load_token();
 
@@ -353,6 +358,7 @@ impl HardwaveAnalyserEditor {
             resize_tx: Arc::new(Mutex::new(None)),
             instance_id: unique_instance_id(),
             params,
+            consumers,
             #[cfg(target_os = "windows")]
             webview2_probe,
         }
@@ -813,6 +819,8 @@ impl Editor for HardwaveAnalyserEditor {
         let packet_slot = Arc::clone(&self.packet_slot);
         let running = Arc::new(AtomicBool::new(true));
         let auth_token = Arc::clone(&self.auth_token);
+        // The analysis runs from here until the handle below is dropped.
+        let open = self.consumers.editor_opened();
 
         // Resize channel: IPC/host → webview thread
         let (resize_tx_val, resize_rx) = crossbeam_channel::unbounded::<(u32, u32)>();
@@ -1006,6 +1014,7 @@ impl Editor for HardwaveAnalyserEditor {
                         _webview: Some(wv_arc),
                         _web_context: Some(SendWebContext(web_context)),
                         running,
+                        _open: open,
                     })
                 }
                 Err(e) => {
@@ -1015,6 +1024,7 @@ impl Editor for HardwaveAnalyserEditor {
                         _webview: None,
                         _web_context: None,
                         running,
+                        _open: open,
                     })
                 }
             }
@@ -1244,6 +1254,7 @@ impl Editor for HardwaveAnalyserEditor {
                 _webview: None,
                 _web_context: None,
                 running,
+                _open: open,
             })
         }
     }
@@ -1285,6 +1296,8 @@ struct EditorHandle {
     /// Must outlive the webview.
     _web_context: Option<SendWebContext>,
     running: Arc<AtomicBool>,
+    /// Keeps the analysis running while the window is open.
+    _open: EditorOpen,
 }
 
 impl Drop for EditorHandle {
@@ -1468,6 +1481,7 @@ mod token_tests {
             resize_tx: Arc::new(Mutex::new(None)),
             instance_id: unique_instance_id(),
             params: Arc::new(HardwaveAnalyserParams::default()),
+            consumers: Consumers::new(),
             #[cfg(target_os = "windows")]
             webview2_probe: Mutex::new(None),
         }
