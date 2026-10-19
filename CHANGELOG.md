@@ -1,5 +1,9 @@
 # Hardwave Analyser — Changelog
 
+## v1.0.31-rc1
+
+- On Windows, the Analyser now loads on computers without the Visual C++ Redistributable installed (#13)
+
 ## v1.0.30-rc1
 
 - Your sign-in no longer travels in the plug-in window's web address (#11)
