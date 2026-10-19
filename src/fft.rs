@@ -352,6 +352,7 @@ impl FftProcessor {
 
         let gain = coherent_gain(self.window_fn);
         let scale = 2.0 / (FFT_SIZE as f32 * gain);
+        let power_scale = scale * scale;
 
         // Determine how many overlapped segments we can fit
         let hop = FFT_SIZE / 2; // 50% overlap
@@ -380,10 +381,11 @@ impl FftProcessor {
             self.fft
                 .process_with_scratch(&mut self.fft_buffer, &mut self.fft_scratch);
 
-            // Accumulate magnitude squared (power spectrum)
+            // Accumulate magnitude squared (power spectrum). norm_sqr() gives
+            // the square directly; norm() is a hypot per bin that was then
+            // squared again, and was the most expensive step after the FFT.
             for i in 0..NUM_BINS {
-                let mag = self.fft_buffer[i].norm() * scale;
-                self.welch_accum[i] += mag * mag;
+                self.welch_accum[i] += self.fft_buffer[i].norm_sqr() * power_scale;
             }
         }
 
@@ -715,6 +717,55 @@ mod tests {
             let buffer = &samples[end.saturating_sub(span)..end];
             assert_eq!(window.peak().to_bits(), oversampled_peak(buffer).to_bits());
             assert!(FftProcessor::levels(buffer, window.peak()).2.is_finite());
+        }
+    }
+
+    /// The bins as they were computed before norm_sqr(): the magnitude via
+    /// norm(), scaled, then squared.
+    fn bins_via_norm(processor: &mut FftProcessor, samples: &[f32]) -> Vec<f32> {
+        let scale = 2.0 / (FFT_SIZE as f32 * coherent_gain(processor.window_fn));
+        let hop = FFT_SIZE / 2;
+        let mut accum = vec![0.0_f32; NUM_BINS];
+        for seg in 0..WELCH_SEGMENTS {
+            let start = seg * hop;
+            for i in 0..FFT_SIZE {
+                processor.fft_buffer[i] =
+                    Complex::new(samples[start + i] * processor.window[i], 0.0);
+            }
+            processor
+                .fft
+                .process_with_scratch(&mut processor.fft_buffer, &mut processor.fft_scratch);
+            for i in 0..NUM_BINS {
+                let mag = processor.fft_buffer[i].norm() * scale;
+                accum[i] += mag * mag;
+            }
+        }
+        accum
+            .iter()
+            .map(|&p| {
+                let rms_mag = (p / WELCH_SEGMENTS as f32).sqrt();
+                (20.0 * (rms_mag + 1e-10).log10()).clamp(-100.0, 0.0)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_power_without_square_root_matches_norm() {
+        let loud = true_peak_material(WELCH_MIN_SAMPLES);
+        let quiet: Vec<f32> = loud.iter().map(|v| v * 1e-4).collect();
+        for wf in [WindowFn::Hann, WindowFn::BlackmanHarris, WindowFn::Kaiser] {
+            for samples in [&loud, &quiet] {
+                let mut processor = FftProcessor::new();
+                processor.set_window_fn(wf);
+                let bins = processor.process(samples, 48_000.0);
+                let reference = bins_via_norm(&mut processor, samples);
+                let worst = bins
+                    .iter()
+                    .zip(&reference)
+                    .map(|(a, b)| (a - b).abs())
+                    .fold(0.0_f32, f32::max);
+                assert!(worst < 1e-3, "bins differ by up to {worst} dB");
+            }
         }
     }
 
