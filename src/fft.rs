@@ -245,7 +245,9 @@ pub struct TruePeakWindow {
 }
 
 impl TruePeakWindow {
-    /// Allocates the queue for the whole window up front.
+    /// The queue starts small and grows if it has to: on real audio it holds
+    /// a handful of entries, and only a steadily falling level fills it (one
+    /// per sample). Not for the audio thread.
     pub fn new(span: usize) -> Self {
         let span = span.max(TP_TAPS);
         Self {
@@ -253,7 +255,7 @@ impl TruePeakWindow {
             history: [0.0; 2 * TP_TAPS],
             newest: TP_TAPS - 1,
             pushed: 0,
-            maxima: VecDeque::with_capacity(span),
+            maxima: VecDeque::with_capacity(span.min(1024)),
         }
     }
 
