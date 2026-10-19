@@ -985,6 +985,7 @@ dependencies = [
  "dirs",
  "ed25519-dalek",
  "gtk",
+ "libc",
  "native-tls",
  "nih_plug",
  "parking_lot",

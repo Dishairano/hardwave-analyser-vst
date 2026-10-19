@@ -18,6 +18,8 @@
 #![allow(semicolon_in_expressions_from_macros)]
 #![allow(semicolon_in_expressions_from_non_local_macros)]
 mod auth;
+#[cfg(test)]
+mod bench;
 #[macro_use]
 pub mod diag;
 #[cfg(feature = "gui")]
