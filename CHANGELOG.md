@@ -1,8 +1,8 @@
 # Hardwave Analyser — Changelog
 
-## Unreleased
+## v1.0.32-rc1
 
-- **The Analyser uses far less CPU in your DAW.** It used to work out the spectrum, levels and true peak on the DAW's audio thread up to 144 times a second, even with its window closed. That work now runs on a thread of its own, and only while the window is open or the Suite is connected. On our test machine its cost on the audio thread fell from 12 to 30 percent of a core to about 0.5 percent, and its slowest buffer from 6 to 10 ms, longer than a 256-sample buffer lasts (5.3 ms), to 0.2 ms. Loudness is still measured on every sample, exactly as before.
+- **The Analyser uses far less CPU in your DAW.** It used to work out the spectrum, levels and true peak on the DAW's audio thread up to 144 times a second, even with its window closed. That work now runs on a thread of its own, and only while the window is open or the Suite is connected. On our test machine its cost on the audio thread fell from 12 to 30 percent of a core to about 0.5 percent, and its slowest buffer from 6 to 10 ms, longer than a 256-sample buffer lasts (5.3 ms), to 0.2 ms. Loudness is still measured on every sample, exactly as before (#15)
 
 ## v1.0.31-rc1
 
