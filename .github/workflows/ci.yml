@@ -80,3 +80,22 @@ jobs:
       # on Windows, like the one holding the module pin in place, was therefore never run anywhere.
       - name: Run tests
         run: cargo test --release
+
+      # A plug-in that imports the Visual C++ runtime does not load on a computer without the
+      # Visual C++ Redistributable (LoadLibrary error 126). Import names are stored as plain text
+      # in the import table, so finding one in the built files means the static link is missing.
+      - name: Build plugin bundle
+        if: matrix.os == 'windows-latest'
+        run: cargo xtask bundle hardwave-analyser --release
+      - name: No Visual C++ runtime imports
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem target/bundled -Recurse -File | Where-Object { $_.Extension -in '.clap', '.vst3' }
+          if (-not $files) { throw 'no Windows plug-in found in target/bundled' }
+          $bad = foreach ($f in $files) {
+            $text = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($f.FullName))
+            foreach ($m in [regex]::Matches($text, '(?i)(vcruntime\d+(_\d)?|msvcp\d+|concrt\d+|vcomp\d+)\.dll')) { "$($f.Name) imports $($m.Value)" }
+          }
+          $files | ForEach-Object { "checked $($_.FullName)" }
+          if ($bad) { $bad | Sort-Object -Unique; throw 'a Windows build imports the Visual C++ runtime' }
