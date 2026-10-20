@@ -707,13 +707,7 @@ fn interface_reachable(url: &str) -> bool {
 /// text. That text starts with the URL, so a token that happened to contain "dns" or "refused"
 /// turned a timeout into a certain "offline" and took the window away from that one user.
 fn probe_interface(url: &str) -> (bool, Option<String>) {
-    match ureq::builder()
-        .timeout_connect(std::time::Duration::from_millis(1500))
-        .timeout(std::time::Duration::from_secs(3))
-        .build()
-        .head(without_query(url))
-        .call()
-    {
+    match probe_agent().head(without_query(url)).call() {
         Ok(_) => (true, None),
         // A status code is an answer: the server is there.
         Err(ureq::Error::Status(_, _)) => (true, None),
@@ -723,6 +717,16 @@ fn probe_interface(url: &str) -> (bool, Option<String>) {
             (!definite, Some(reason))
         }
     }
+}
+
+/// The agent the probe asks with: short deadlines, because the window waits on the answer.
+///
+/// HTTPS comes from ureq's `tls` feature (rustls), which gives every agent a connector on its own.
+fn probe_agent() -> ureq::Agent {
+    ureq::builder()
+        .timeout_connect(std::time::Duration::from_millis(1500))
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
 }
 
 /// `url` up to its query string or fragment.
@@ -1388,6 +1392,47 @@ mod offline_tests {
         ));
         // Words that only mean something in a lookup or a connect mean nothing elsewhere.
         assert!(!offline_is_certain(Io, "Network Error: dns refused"));
+    }
+
+    /// The probe's agent must be able to speak HTTPS. With ureq's `native-tls` feature and no
+    /// connector handed in, every https:// request failed with "Unknown Scheme" before a byte went
+    /// out, so the probe never told offline from online and no crash report was ever sent.
+    ///
+    /// ureq only reaches its TLS layer once the TCP connection is up, so the request goes to a
+    /// local listener that accepts and hangs up: the handshake then fails with an I/O or connect
+    /// error, which needs no network. Only `UnknownScheme` is the bug.
+    #[test]
+    fn the_probe_agent_can_make_https_requests() {
+        assert_tls_reached(&probe_agent());
+    }
+
+    /// The crash reporter posts through ureq's default agent, which needs HTTPS just the same.
+    #[test]
+    fn the_default_agent_can_make_https_requests() {
+        assert_tls_reached(&ureq::agent());
+    }
+
+    fn assert_tls_reached(agent: &ureq::Agent) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a local port");
+        let port = listener.local_addr().expect("local address").port();
+        std::thread::spawn(move || {
+            if let Ok((stream, _)) = listener.accept() {
+                drop(stream);
+            }
+        });
+
+        let result = agent
+            .head(&format!("https://127.0.0.1:{port}/"))
+            .timeout(std::time::Duration::from_secs(3))
+            .call();
+        if let Err(ureq::Error::Transport(t)) = result {
+            assert_ne!(
+                t.kind(),
+                ureq::ErrorKind::UnknownScheme,
+                "no TLS backend: {}",
+                transport_reason(&t)
+            );
+        }
     }
 
     #[test]
