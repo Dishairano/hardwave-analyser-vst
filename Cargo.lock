@@ -994,6 +994,8 @@ dependencies = [
  "serde_json",
  "tungstenite",
  "ureq",
+ "webview2-com",
+ "windows 0.58.0",
  "wry",
 ]
 

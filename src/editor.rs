@@ -195,6 +195,8 @@ const ANALYSER_URL: &str = "https://analyser.hardwavestudios.com/vst/analyser";
 // raw-window-handle 0.5 (nih-plug) → 0.6 (wry) bridge
 // ---------------------------------------------------------------------------
 
+// wry's handle to the host's window. Windows builds its page without wry (see webview_win).
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 struct RwhWrapper(ParentWindowHandle);
 
 impl rwh06::HasWindowHandle for RwhWrapper {
@@ -636,10 +638,12 @@ fn pin_own_module() -> bool {
 /// One line at each call site: the interface when it can be reached, a page that says why not when
 /// it cannot. Three platforms build the webview slightly differently, and none of them should have
 /// to spell this out.
+#[cfg(not(target_os = "windows"))]
 trait WithUrlOrOffline {
     fn with_url_or_offline(self, url: &str) -> Self;
 }
 
+#[cfg(not(target_os = "windows"))]
 impl WithUrlOrOffline for wry::WebViewBuilder<'_> {
     fn with_url_or_offline(self, url: &str) -> Self {
         if interface_reachable(url) {
@@ -876,10 +880,6 @@ impl Editor for HardwaveAnalyserEditor {
             debug_log(&format!("Using WebView2 data dir: {:?}", data_dir));
             sw.mark("data dir ready");
 
-            let mut web_context = wry::WebContext::new(Some(data_dir));
-            sw.mark("WebContext::new()");
-
-            let parent_wrapper = RwhWrapper(parent);
             let ipc_auth_token = Arc::clone(&auth_token);
             let ipc_params = Arc::clone(&self.params);
 
@@ -937,97 +937,84 @@ impl Editor for HardwaveAnalyserEditor {
 
             sw.mark("init script built");
 
-            #[allow(unused_imports)]
-            use wry::WebViewBuilderExtWindows as _;
-
-            let webview = wry::WebViewBuilder::with_web_context(&mut web_context)
-                .with_additional_browser_args(
-                    "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection \
-                     --allow-insecure-localhost",
-                )
-                .with_devtools(false)
-                .with_transparent(false)
-                .with_background_color((10, 10, 11, 255))
-                .with_visible(true)
-                .with_focused(true)
-                .with_url_or_offline(&url)
-                .with_navigation_handler(|url: String| {
-                    url.starts_with("https://hardwavestudios.com/")
-                        || url.starts_with("https://analyser.hardwavestudios.com/")
-                        || url.starts_with("http://127.0.0.1:")
-                })
-                .with_ipc_handler({
-                    let ipc_editor_size = Arc::clone(&editor_size);
-                    let ipc_resize_tx = Arc::clone(&resize_tx);
-                    let ipc_context = Arc::clone(&context);
-                    move |req: wry::http::Request<String>| {
-                        let msg = req.body().as_str();
-                        if let Some(token) = msg.strip_prefix("saveToken:") {
-                            let token = token.trim().to_string();
-                            auth::save_token(&token);
-                            *ipc_auth_token.lock() = Some(token);
-                        } else if let Some(signed) = msg.strip_prefix("saveSubCache:") {
-                            auth::save_sub_cache(signed.trim());
-                        } else if msg == "clearToken" {
-                            auth::clear_token();
-                            *ipc_auth_token.lock() = None;
-                        } else if let Some(state) = msg.strip_prefix("saveState:") {
-                            // Preset/config state from the webview. Windows
-                            // normally saves via POST /state on the packet
-                            // server; this IPC path is the belt-and-braces
-                            // fallback and the primary path on other OSes.
-                            if !state.is_empty() && state != "null" {
-                                *ipc_params.preset_state.write() = Some(state.to_string());
-                                auth::save_preset_state(state);
-                            }
-                        } else if let Some(json) = msg.strip_prefix("resize:") {
-                            // JS sends "resize:{w},{h}"
-                            let parts: Vec<&str> = json.split(',').collect();
-                            if parts.len() == 2 {
-                                if let (Ok(w), Ok(h)) =
-                                    (parts[0].parse::<u32>(), parts[1].parse::<u32>())
-                                {
-                                    let w = w.clamp(MIN_WIDTH, MAX_WIDTH);
-                                    let h = h.clamp(MIN_HEIGHT, MAX_HEIGHT);
-                                    *ipc_editor_size.lock() = (w, h);
-                                    if ipc_context.request_resize() {
-                                        if let Some(tx) = ipc_resize_tx.lock().as_ref() {
-                                            let _ = tx.send((w, h));
-                                        }
+            // Built in the background (see webview_win): the host has its thread back as soon as
+            // this returns, and the window shows the editor's colour until the page is there.
+            let on_message: Box<dyn Fn(&str)> = Box::new({
+                let ipc_editor_size = Arc::clone(&editor_size);
+                let ipc_resize_tx = Arc::clone(&resize_tx);
+                let ipc_context = Arc::clone(&context);
+                move |msg: &str| {
+                    if let Some(token) = msg.strip_prefix("saveToken:") {
+                        let token = token.trim().to_string();
+                        auth::save_token(&token);
+                        *ipc_auth_token.lock() = Some(token);
+                    } else if let Some(signed) = msg.strip_prefix("saveSubCache:") {
+                        auth::save_sub_cache(signed.trim());
+                    } else if msg == "clearToken" {
+                        auth::clear_token();
+                        *ipc_auth_token.lock() = None;
+                    } else if let Some(state) = msg.strip_prefix("saveState:") {
+                        // Preset/config state from the webview. Windows
+                        // normally saves via POST /state on the packet
+                        // server; this IPC path is the belt-and-braces
+                        // fallback and the primary path on other OSes.
+                        if !state.is_empty() && state != "null" {
+                            *ipc_params.preset_state.write() = Some(state.to_string());
+                            auth::save_preset_state(state);
+                        }
+                    } else if let Some(json) = msg.strip_prefix("resize:") {
+                        // JS sends "resize:{w},{h}"
+                        let parts: Vec<&str> = json.split(',').collect();
+                        if parts.len() == 2 {
+                            if let (Ok(w), Ok(h)) =
+                                (parts[0].parse::<u32>(), parts[1].parse::<u32>())
+                            {
+                                let w = w.clamp(MIN_WIDTH, MAX_WIDTH);
+                                let h = h.clamp(MIN_HEIGHT, MAX_HEIGHT);
+                                *ipc_editor_size.lock() = (w, h);
+                                if ipc_context.request_resize() {
+                                    if let Some(tx) = ipc_resize_tx.lock().as_ref() {
+                                        let _ = tx.send((w, h));
                                     }
                                 }
                             }
                         }
                     }
-                })
-                .with_initialization_script(&init_script)
-                .build(&parent_wrapper);
-
-            match webview {
-                Ok(wv) => {
-                    sw.dump("WebViewBuilder::build() OK — webview visible");
-
-                    let wv_arc = Arc::new(Mutex::new(SendWebView(wv)));
-
-                    Box::new(EditorHandle {
-                        _thread: None,
-                        _webview: Some(wv_arc),
-                        _web_context: Some(SendWebContext(web_context)),
-                        running,
-                        _open: open,
-                    })
                 }
-                Err(e) => {
-                    sw.dump(&format!("WebViewBuilder::build() FAILED: {}", e));
-                    Box::new(EditorHandle {
-                        _thread: None,
-                        _webview: None,
-                        _web_context: None,
-                        running,
-                        _open: open,
-                    })
-                }
-            }
+            });
+            let page = crate::webview_win::open(
+                parent_hwnd as isize,
+                crate::webview_win::Spec {
+                    offline_html: offline_page(&url),
+                    reachable: {
+                        let url = url.clone();
+                        Box::new(move || interface_reachable(&url))
+                    },
+                    url,
+                    init_script,
+                    data_dirs: vec![data_dir],
+                    background: (10, 10, 11),
+                    browser_args: Some(
+                        "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection \
+                         --allow-insecure-localhost"
+                            .to_string(),
+                    ),
+                    allow_navigation: Some(Box::new(|url: &str| {
+                        url.starts_with("https://hardwavestudios.com/")
+                            || url.starts_with("https://analyser.hardwavestudios.com/")
+                            || url.starts_with("http://127.0.0.1:")
+                    })),
+                    on_message,
+                },
+            );
+            sw.dump("page started in the background");
+
+            Box::new(EditorHandle {
+                _thread: None,
+                _page: Some(page),
+                running,
+                _open: open,
+            })
         }
 
         // ---------------------------------------------------------------
@@ -1292,13 +1279,23 @@ unsafe impl Send for SendWebContext {}
 /// Handle returned from `spawn()`. When dropped, the editor closes.
 struct EditorHandle {
     _thread: Option<thread::JoinHandle<()>>,
+    /// The page on Windows, built in the background.
+    #[cfg(target_os = "windows")]
+    _page: Option<crate::webview_win::Page>,
+    #[cfg(not(target_os = "windows"))]
     _webview: Option<Arc<Mutex<SendWebView>>>,
     /// Must outlive the webview.
+    #[cfg(not(target_os = "windows"))]
     _web_context: Option<SendWebContext>,
     running: Arc<AtomicBool>,
     /// Keeps the analysis running while the window is open.
     _open: EditorOpen,
 }
+
+// SAFETY: on Windows the host creates and drops the editor handle on its UI thread, the thread
+// that owns the page; the page's `Rc` is only moved across threads with the handle, never used.
+#[cfg(target_os = "windows")]
+unsafe impl Send for EditorHandle {}
 
 impl Drop for EditorHandle {
     fn drop(&mut self) {

@@ -31,6 +31,8 @@ mod params;
 mod protocol;
 mod ring;
 mod websocket;
+#[cfg(any(target_os = "windows", test))]
+mod webview_win;
 
 use nih_plug::prelude::*;
 use parking_lot::Mutex;
