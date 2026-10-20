@@ -65,6 +65,93 @@ impl Gate {
     }
 }
 
+/// Browsers of closed pages that may still be shutting down, by data folder.
+///
+/// WebView2 starts a new browser for a folder whose old browser is still exiting, and the new one
+/// may then wait about 30 s for the old one: WettBoi opened 3 s after it closed showed its page
+/// after 33 s in FL Studio (20 Oct 2026), against 3 s the first time. A page opened while the
+/// closed page's browser is still running starts in the next folder instead, which has a browser
+/// of its own; the next open after that finds the first folder free again.
+struct Closing {
+    browsers: Vec<(std::path::PathBuf, u32)>,
+}
+
+// Only the Windows build keeps browsers; the tests run it everywhere.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+impl Closing {
+    const fn new() -> Self {
+        Closing {
+            browsers: Vec::new(),
+        }
+    }
+
+    /// A page on `dir` closed, and no other page used its browser `pid`.
+    fn closed(&mut self, dir: std::path::PathBuf, pid: u32) {
+        self.browsers.retain(|(d, _)| *d != dir);
+        self.browsers.push((dir, pid));
+    }
+
+    /// The folders in the order to try them: when a closed page's browser on the first is still
+    /// running and no open page uses it, the first and the second change places. Also returns
+    /// that browser. Browsers that are gone are forgotten.
+    fn order(
+        &mut self,
+        mut dirs: Vec<std::path::PathBuf>,
+        running: impl Fn(u32) -> bool,
+        in_use: impl Fn(u32) -> bool,
+    ) -> (Vec<std::path::PathBuf>, Option<u32>) {
+        self.browsers.retain(|&(_, pid)| running(pid));
+        let Some(first) = dirs.first() else {
+            return (dirs, None);
+        };
+        let closing = self
+            .browsers
+            .iter()
+            .find(|(d, pid)| d == first && !in_use(*pid))
+            .map(|&(_, pid)| pid);
+        if closing.is_some() && dirs.len() > 1 {
+            dirs.swap(0, 1);
+            (dirs, closing)
+        } else {
+            (dirs, None)
+        }
+    }
+
+    /// The closed page's browser still running on `dir` that no open page uses, if any.
+    fn running_on(
+        &mut self,
+        dir: &std::path::Path,
+        running: impl Fn(u32) -> bool,
+        in_use: impl Fn(u32) -> bool,
+    ) -> Option<u32> {
+        self.browsers.retain(|&(_, pid)| running(pid));
+        self.browsers
+            .iter()
+            .find(|(d, pid)| d == dir && !in_use(*pid))
+            .map(|&(_, pid)| pid)
+    }
+}
+
+/// Whether a page that waits to start its browser starts now: once it has waited `at_least`,
+/// and once the closed page's browser on its folder has gone or it has waited `cap` for it.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn wait_over(
+    waited: std::time::Duration,
+    at_least: std::time::Duration,
+    browser_running: bool,
+    cap: std::time::Duration,
+) -> bool {
+    waited >= at_least && (!browser_running || waited >= cap)
+}
+
+/// Whether a folder WebView2 called in use is tried again: only when no other folder is left,
+/// and a few times. LoudLab's one folder per instance, still held by the closed editor's browser,
+/// failed this way in FL Studio (20 Oct 2026) and the window stayed black.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn try_again_when_in_use(in_use: bool, folders_left: usize, tries: u32, max: u32) -> bool {
+    in_use && folders_left == 0 && tries < max
+}
+
 #[cfg(target_os = "windows")]
 pub use windows_page::{open, Page, Spec};
 // For the keeper; a plug-in without one has no use for it.
@@ -74,12 +161,13 @@ pub use windows_page::Watch;
 
 #[cfg(target_os = "windows")]
 mod windows_page {
-    use super::Gate;
+    use super::{try_again_when_in_use, wait_over, Closing, Gate};
     use std::cell::{Cell, RefCell};
     use std::collections::VecDeque;
     use std::path::{Path, PathBuf};
     use std::rc::{Rc, Weak};
-    use std::time::Instant;
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
 
     use webview2_com::Microsoft::Web::WebView2::Win32::*;
     use webview2_com::{
@@ -89,9 +177,10 @@ mod windows_page {
         CreateCoreWebView2EnvironmentCompletedHandler, NavigationCompletedEventHandler,
         NavigationStartingEventHandler, WebMessageReceivedEventHandler,
     };
-    use windows::core::{Interface, HSTRING, PCWSTR, PWSTR};
+    use windows::core::{Interface, HRESULT, HSTRING, PCWSTR, PWSTR};
     use windows::Win32::Foundation::{
-        BOOL, COLORREF, E_POINTER, HINSTANCE, HMODULE, HWND, LPARAM, LRESULT, RECT, WPARAM,
+        CloseHandle, BOOL, COLORREF, E_POINTER, HINSTANCE, HMODULE, HWND, LPARAM, LRESULT, RECT,
+        WAIT_TIMEOUT, WPARAM,
     };
     use windows::Win32::Globalization::{
         GetUserDefaultUILanguage, LCIDToLocaleName, LOCALE_ALLOW_NEUTRAL_NAMES, MAX_LOCALE_NAME,
@@ -102,16 +191,19 @@ mod windows_page {
         GetModuleHandleExW, GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
         GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
     };
+    use windows::Win32::System::Threading::{
+        OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
+    };
     use windows::Win32::System::WinRT::EventRegistrationToken;
     use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
     use windows::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DefWindowProcW, DestroyWindow, GetAncestor, GetClientRect,
-        GetForegroundWindow, IsWindow, LoadCursorW, PostMessageW, RegisterClassExW,
-        RegisterWindowMessageW, SetWindowPos, ShowWindow, CS_HREDRAW, CS_VREDRAW, GA_ROOT, HMENU,
-        HWND_TOP, IDC_ARROW, SIZE_MINIMIZED, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOMOVE,
-        SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER, SW_SHOW, WINDOW_EX_STYLE, WM_ENTERSIZEMOVE,
-        WM_NCDESTROY, WM_SETFOCUS, WM_SIZE, WM_WINDOWPOSCHANGED, WNDCLASSEXW, WS_CHILD,
-        WS_CLIPCHILDREN, WS_VISIBLE,
+        GetForegroundWindow, IsWindow, KillTimer, LoadCursorW, PostMessageW, RegisterClassExW,
+        RegisterWindowMessageW, SetTimer, SetWindowPos, ShowWindow, CS_HREDRAW, CS_VREDRAW,
+        GA_ROOT, HMENU, HWND_TOP, IDC_ARROW, SIZE_MINIMIZED, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE,
+        SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER, SW_SHOW, WINDOW_EX_STYLE,
+        WM_ENTERSIZEMOVE, WM_NCDESTROY, WM_SETFOCUS, WM_SIZE, WM_TIMER, WM_WINDOWPOSCHANGED,
+        WNDCLASSEXW, WS_CHILD, WS_CLIPCHILDREN, WS_VISIBLE,
     };
 
     /// Called with each message the page sends with `window.ipc.postMessage`.
@@ -160,6 +252,20 @@ mod windows_page {
     /// Our id among the subclasses on the host's window.
     const SUBCLASS_ID: usize = 0x4857_5750;
 
+    /// The container's timer while the page waits to start its browser.
+    const WAIT_TIMER: usize = 0x4857_5751;
+    const WAIT_TICK_MS: u32 = 100;
+    /// How long a page waits for a closed page's browser on its only folder.
+    const CLOSING_WAIT: Duration = Duration::from_secs(10);
+    /// A folder WebView2 calls in use is tried again this long after, this many times.
+    const IN_USE_PAUSE: Duration = Duration::from_secs(1);
+    const IN_USE_TRIES: u32 = 5;
+    /// HRESULT_FROM_WIN32(ERROR_BUSY), "The requested resource is in use".
+    const IN_USE: HRESULT = HRESULT(0x8007_00AA_u32 as i32);
+
+    /// For the whole process: a browser serves every page on its folder, whichever thread.
+    static CLOSING: Mutex<Closing> = Mutex::new(Closing::new());
+
     struct Shared {
         parent: HWND,
         container: Cell<HWND>,
@@ -181,6 +287,15 @@ mod windows_page {
         env: RefCell<Option<ICoreWebView2Environment>>,
         controller: RefCell<Option<ICoreWebView2Controller>>,
         webview: RefCell<Option<ICoreWebView2>>,
+        /// The folder of the WebView in use.
+        dir: RefCell<Option<PathBuf>>,
+        /// The thread the page opened on, which WebView2 wants for every call.
+        thread: std::thread::ThreadId,
+        /// The folder the page waits to start its browser in, since when, and for at least how
+        /// long.
+        waiting: RefCell<Option<(PathBuf, Instant, Duration)>>,
+        /// How often a folder was found in use and tried again.
+        in_use_tries: Cell<u32>,
     }
 
     thread_local! {
@@ -206,7 +321,7 @@ mod windows_page {
                 .browser_args
                 .unwrap_or_else(|| BROWSER_ARGUMENTS.to_string()),
             allow_navigation: RefCell::new(spec.allow_navigation),
-            dirs: RefCell::new(spec.data_dirs.into()),
+            dirs: RefCell::new(ordered_dirs(spec.data_dirs).into()),
             gate: RefCell::new(Gate::default()),
             hooked: Cell::new(false),
             loaded: Cell::new(false),
@@ -215,6 +330,10 @@ mod windows_page {
             env: RefCell::new(None),
             controller: RefCell::new(None),
             webview: RefCell::new(None),
+            dir: RefCell::new(None),
+            thread: std::thread::current().id(),
+            waiting: RefCell::new(None),
+            in_use_tries: Cell::new(0),
         });
         let _ = PAGES.try_with(|pages| {
             if let Ok(mut pages) = pages.try_borrow_mut() {
@@ -245,7 +364,11 @@ mod windows_page {
             if let Ok(mut gate) = s.gate.try_borrow_mut() {
                 gate.close();
             }
+            if std::thread::current().id() != s.thread {
+                elog!("[{NAME}] page: closed on another thread than it opened on");
+            }
             s.unhook_parent();
+            s.remember_browser();
             let controller = s
                 .controller
                 .try_borrow_mut()
@@ -253,7 +376,9 @@ mod windows_page {
                 .and_then(|mut c| c.take());
             if let Some(controller) = controller {
                 // SAFETY: a controller we hold, closed once.
-                let _ = unsafe { controller.Close() };
+                if let Err(e) = unsafe { controller.Close() } {
+                    elog!("[{NAME}] page: closing the WebView failed: {e}");
+                }
             }
             if let Ok(mut w) = s.webview.try_borrow_mut() {
                 w.take();
@@ -467,6 +592,86 @@ mod windows_page {
                 return;
             };
             elog!("[{NAME}] WebView2 data dir: {:?}", dir);
+            // The only folder left, and a closed page's browser still runs there: wait for it to
+            // go, rather than start a browser that waits on it or finds the folder in use.
+            if self.dirs.borrow().is_empty() {
+                if let Some(pid) = closing_browser(&dir) {
+                    elog!(
+                        "[{NAME}] page: waiting for the closed editor's browser (pid {pid}) to exit"
+                    );
+                    self.wait_then_start(dir, Duration::ZERO);
+                    return;
+                }
+            }
+            self.start_environment(dir);
+        }
+
+        fn wait_then_start(self: &Rc<Self>, dir: PathBuf, at_least: Duration) {
+            *self.waiting.borrow_mut() = Some((dir, Instant::now(), at_least));
+            // SAFETY: our own window; the timer goes with it.
+            if unsafe { SetTimer(self.container.get(), WAIT_TIMER, WAIT_TICK_MS, None) } == 0 {
+                let waiting = self.waiting.borrow_mut().take();
+                if let Some((dir, _, _)) = waiting {
+                    self.start_environment(dir);
+                }
+            }
+        }
+
+        /// The container's timer while the page waits to start its browser.
+        fn wait_tick(self: &Rc<Self>) {
+            let Some((dir, since, at_least)) = self.waiting.borrow().clone() else {
+                return;
+            };
+            let waited = since.elapsed();
+            let running = closing_browser(&dir).is_some();
+            if !wait_over(waited, at_least, running, CLOSING_WAIT) {
+                return;
+            }
+            // SAFETY: our own window and timer.
+            let _ = unsafe { KillTimer(self.container.get(), WAIT_TIMER) };
+            self.waiting.borrow_mut().take();
+            if running {
+                elog!(
+                    "[{NAME}] page: the closed editor's browser still runs after {} ms; starting anyway",
+                    waited.as_millis()
+                );
+            } else if at_least.is_zero() {
+                elog!(
+                    "[{NAME}] page: the closed editor's browser exited after {} ms",
+                    waited.as_millis()
+                );
+            }
+            self.start_environment(dir);
+        }
+
+        /// A folder that failed: tried again when WebView2 called it in use and no other folder
+        /// is left, else the next folder.
+        fn after_failure(self: &Rc<Self>, dir: &Path, e: &windows::core::Error) {
+            let tries = self.in_use_tries.get();
+            if try_again_when_in_use(
+                e.code() == IN_USE,
+                self.dirs.borrow().len(),
+                tries,
+                IN_USE_TRIES,
+            ) {
+                self.in_use_tries.set(tries + 1);
+                elog!(
+                    "[{NAME}] page: {:?} is in use; trying it again in {} ms ({} of {})",
+                    dir,
+                    IN_USE_PAUSE.as_millis(),
+                    tries + 1,
+                    IN_USE_TRIES
+                );
+                self.wait_then_start(dir.to_path_buf(), IN_USE_PAUSE);
+                return;
+            }
+            self.next_environment();
+        }
+
+        fn start_environment(self: &Rc<Self>, dir: PathBuf) {
+            if self.closed() || self.window_gone() {
+                return;
+            }
             let _ = std::fs::create_dir_all(&dir);
             // WebView2 may call back even when the call itself failed; only the first answer counts.
             let settled = Rc::new(Cell::new(false));
@@ -512,7 +717,7 @@ mod windows_page {
                 Ok(env) => env,
                 Err(e) => {
                     elog!("[{NAME}] WebView creation FAILED in {:?}: {}", dir, e);
-                    self.next_environment();
+                    self.after_failure(dir, &e);
                     return;
                 }
             };
@@ -553,7 +758,7 @@ mod windows_page {
                     if !self.closed() {
                         elog!("[{NAME}] WebView creation FAILED in {:?}: {}", dir, e);
                         self.env.borrow_mut().take();
-                        self.next_environment();
+                        self.after_failure(dir, &e);
                     }
                     return;
                 }
@@ -569,6 +774,7 @@ mod windows_page {
                 dir,
                 self.ms()
             );
+            *self.dir.borrow_mut() = Some(dir.to_path_buf());
             // SAFETY: a live controller, on its own thread.
             if let Err(e) = unsafe { self.set_up(&controller) } {
                 // A browser process that died on the way, say. wry's build failed here and the
@@ -583,6 +789,7 @@ mod windows_page {
                 self.controller.borrow_mut().take();
                 self.webview.borrow_mut().take();
                 self.env.borrow_mut().take();
+                self.dir.borrow_mut().take();
                 self.gate.borrow_mut().webview_lost();
                 self.next_environment();
             }
@@ -851,6 +1058,92 @@ mod windows_page {
     }
 
     /// The newest page whose host window, or whose own window, is `hwnd`.
+    impl Shared {
+        /// A closing page that was the last on its browser leaves the browser to `CLOSING`, so
+        /// a page opened before it has exited starts in another folder.
+        fn remember_browser(self: &Rc<Self>) {
+            let Some(dir) = self.dir.try_borrow().ok().and_then(|d| d.clone()) else {
+                return;
+            };
+            let Some(pid) = self
+                .webview
+                .try_borrow()
+                .ok()
+                .and_then(|w| w.as_ref().and_then(browser_of))
+            else {
+                return;
+            };
+            if browser_in_use(pid, Some(self)) {
+                return;
+            }
+            elog!("[{NAME}] page: closed; its browser (pid {pid}) is left to exit");
+            if let Ok(mut closing) = CLOSING.lock() {
+                closing.closed(dir, pid);
+            }
+        }
+    }
+
+    /// The folders to try, the first moved back when a closed page's browser still runs there.
+    fn ordered_dirs(dirs: Vec<PathBuf>) -> Vec<PathBuf> {
+        let Ok(mut closing) = CLOSING.lock() else {
+            return dirs;
+        };
+        let (dirs, closing_browser) =
+            closing.order(dirs, process_running, |pid| browser_in_use(pid, None));
+        if let Some(pid) = closing_browser {
+            elog!(
+                "[{NAME}] page: the closed editor's browser (pid {pid}) is still running; starting in the next folder"
+            );
+        }
+        dirs
+    }
+
+    /// The closed page's browser to wait for before starting one on `dir`, if any.
+    fn closing_browser(dir: &Path) -> Option<u32> {
+        let mut closing = CLOSING.lock().ok()?;
+        closing.running_on(dir, process_running, |pid| browser_in_use(pid, None))
+    }
+
+    fn browser_of(webview: &ICoreWebView2) -> Option<u32> {
+        let mut pid = 0u32;
+        // SAFETY: a live WebView on its own thread; the answer goes into `pid`.
+        unsafe { webview.BrowserProcessId(&mut pid) }.ok()?;
+        (pid != 0).then_some(pid)
+    }
+
+    /// Whether a page on this thread other than `except` has a WebView on browser `pid`.
+    fn browser_in_use(pid: u32, except: Option<&Rc<Shared>>) -> bool {
+        PAGES
+            .try_with(|pages| {
+                let Ok(pages) = pages.try_borrow() else {
+                    return false;
+                };
+                pages.iter().filter_map(Weak::upgrade).any(|p| {
+                    !except.is_some_and(|e| Rc::ptr_eq(e, &p))
+                        && p.webview
+                            .try_borrow()
+                            .ok()
+                            .and_then(|w| w.as_ref().and_then(browser_of))
+                            == Some(pid)
+                })
+            })
+            .unwrap_or(false)
+    }
+
+    fn process_running(pid: u32) -> bool {
+        // SAFETY: a plain query.
+        match unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, pid) } {
+            Ok(handle) => {
+                // SAFETY: the handle just opened.
+                let running = unsafe { WaitForSingleObject(handle, 0) } == WAIT_TIMEOUT;
+                // SAFETY: closed once.
+                let _ = unsafe { CloseHandle(handle) };
+                running
+            }
+            Err(_) => false,
+        }
+    }
+
     fn page_for(hwnd: HWND, own_window: bool) -> Option<Rc<Shared>> {
         PAGES
             .try_with(|pages| {
@@ -922,6 +1215,12 @@ mod windows_page {
         if msg == probe_message() {
             if let Some(page) = page_for(hwnd, true) {
                 page.probed(wparam.0 != 0);
+            }
+            return LRESULT(0);
+        }
+        if msg == WM_TIMER && wparam.0 == WAIT_TIMER {
+            if let Some(page) = page_for(hwnd, true) {
+                page.wait_tick();
             }
             return LRESULT(0);
         }
@@ -1021,6 +1320,141 @@ mod windows_page {
             .saturating_sub(1)
             .min(name.len());
         String::from_utf16_lossy(&name[..len])
+    }
+}
+
+#[cfg(test)]
+mod wait_tests {
+    use super::{try_again_when_in_use, wait_over};
+    use std::time::Duration;
+
+    const CAP: Duration = Duration::from_secs(10);
+
+    fn ms(n: u64) -> Duration {
+        Duration::from_millis(n)
+    }
+
+    #[test]
+    fn a_page_waits_while_the_closed_browser_runs() {
+        assert!(!wait_over(ms(300), ms(0), true, CAP));
+        assert!(wait_over(ms(300), ms(0), false, CAP));
+    }
+
+    #[test]
+    fn a_page_stops_waiting_at_the_cap() {
+        assert!(wait_over(ms(10_000), ms(0), true, CAP));
+    }
+
+    #[test]
+    fn a_folder_in_use_is_left_alone_for_the_pause_first() {
+        assert!(!wait_over(ms(500), ms(1_000), false, CAP));
+        assert!(wait_over(ms(1_000), ms(1_000), false, CAP));
+    }
+
+    #[test]
+    fn only_the_last_folder_is_tried_again_when_in_use() {
+        assert!(try_again_when_in_use(true, 0, 0, 5));
+        assert!(!try_again_when_in_use(true, 1, 0, 5));
+        assert!(!try_again_when_in_use(false, 0, 0, 5));
+    }
+
+    #[test]
+    fn a_folder_in_use_is_tried_five_times() {
+        assert!(try_again_when_in_use(true, 0, 4, 5));
+        assert!(!try_again_when_in_use(true, 0, 5, 5));
+    }
+}
+
+#[cfg(test)]
+mod closing_tests {
+    use super::Closing;
+    use std::path::PathBuf;
+
+    fn dirs() -> Vec<PathBuf> {
+        vec![
+            PathBuf::from("a"),
+            PathBuf::from("a-2"),
+            PathBuf::from("a-3"),
+        ]
+    }
+
+    fn names(dirs: &[PathBuf]) -> Vec<&str> {
+        dirs.iter().map(|d| d.to_str().unwrap()).collect()
+    }
+
+    #[test]
+    fn nothing_closing_keeps_the_order() {
+        let mut closing = Closing::new();
+        let (order, pid) = closing.order(dirs(), |_| true, |_| false);
+        assert_eq!(names(&order), ["a", "a-2", "a-3"]);
+        assert_eq!(pid, None);
+    }
+
+    #[test]
+    fn a_running_browser_nobody_uses_moves_its_folder_back() {
+        let mut closing = Closing::new();
+        closing.closed(PathBuf::from("a"), 7);
+        let (order, pid) = closing.order(dirs(), |_| true, |_| false);
+        assert_eq!(names(&order), ["a-2", "a", "a-3"]);
+        assert_eq!(pid, Some(7));
+    }
+
+    #[test]
+    fn a_browser_that_is_gone_is_forgotten() {
+        let mut closing = Closing::new();
+        closing.closed(PathBuf::from("a"), 7);
+        let (order, _) = closing.order(dirs(), |_| false, |_| false);
+        assert_eq!(names(&order), ["a", "a-2", "a-3"]);
+        let (order, _) = closing.order(dirs(), |_| true, |_| false);
+        assert_eq!(names(&order), ["a", "a-2", "a-3"]);
+    }
+
+    #[test]
+    fn a_browser_an_open_page_still_uses_keeps_the_order() {
+        let mut closing = Closing::new();
+        closing.closed(PathBuf::from("a"), 7);
+        let (order, pid) = closing.order(dirs(), |_| true, |pid| pid == 7);
+        assert_eq!(names(&order), ["a", "a-2", "a-3"]);
+        assert_eq!(pid, None);
+    }
+
+    #[test]
+    fn a_closing_browser_on_another_folder_keeps_the_order() {
+        let mut closing = Closing::new();
+        closing.closed(PathBuf::from("a-2"), 7);
+        let (order, _) = closing.order(dirs(), |_| true, |_| false);
+        assert_eq!(names(&order), ["a", "a-2", "a-3"]);
+    }
+
+    #[test]
+    fn a_closed_browser_still_running_on_a_folder_is_found() {
+        let mut closing = Closing::new();
+        closing.closed(PathBuf::from("a"), 7);
+        assert_eq!(
+            closing.running_on(&PathBuf::from("a"), |_| true, |_| false),
+            Some(7)
+        );
+        assert_eq!(
+            closing.running_on(&PathBuf::from("a"), |_| true, |pid| pid == 7),
+            None
+        );
+        assert_eq!(
+            closing.running_on(&PathBuf::from("b"), |_| true, |_| false),
+            None
+        );
+        assert_eq!(
+            closing.running_on(&PathBuf::from("a"), |_| false, |_| false),
+            None
+        );
+    }
+
+    #[test]
+    fn a_single_folder_stays_put() {
+        let mut closing = Closing::new();
+        closing.closed(PathBuf::from("a"), 7);
+        let (order, pid) = closing.order(vec![PathBuf::from("a")], |_| true, |_| false);
+        assert_eq!(names(&order), ["a"]);
+        assert_eq!(pid, None);
     }
 }
 
