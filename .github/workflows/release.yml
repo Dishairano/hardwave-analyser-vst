@@ -15,7 +15,8 @@ env:
 
 jobs:
   build-linux:
-    runs-on: [self-hosted, linux, x64]
+    # GitHub-hosted: a release build on HQ ran it out of memory (20 Oct 2026).
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -24,6 +25,15 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-unknown-linux-gnu
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libasound2-dev libjack-jackd2-dev libx11-dev libxcb1-dev \
+            libxcb-icccm4-dev libxcursor-dev libxkbcommon-dev libxcb-shape0-dev \
+            libxcb-xfixes0-dev libgl1-mesa-dev libgtk-3-dev libglib2.0-dev \
+            libwebkit2gtk-4.1-dev libsoup-3.0-dev
 
       - name: Build
         run: cargo xtask bundle hardwave-analyser --release
