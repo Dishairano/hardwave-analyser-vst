@@ -59,6 +59,21 @@ libc = "0.2"
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = { version = "0.18", optional = true }
 
+[target.'cfg(target_os = "windows")'.dependencies]
+# The editor's WebView2, built without making the host wait (src/webview_win.rs). The versions wry
+# 0.46 uses, so nothing is compiled twice.
+webview2-com = "0.33"
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Globalization",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Com",
+    "Win32_System_LibraryLoader",
+    "Win32_System_WinRT",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
 [features]
 default = ["gui", "gtk"]
 gui = ["wry"]
