@@ -1,0 +1,5 @@
+# webpki-roots 0.26.11 is only a re-export of webpki-roots 1.x, and Cargo.lock pins that to 1.0.10, which carries
+# the fix for RUSTSEC-2026-0381. cargo audit matches the 0.26.11 version number, so it would fail every build.
+# Remove this when ureq (which still asks for webpki-roots 0.26) is upgraded.
+[advisories]
+ignore = ["RUSTSEC-2026-0381"]
