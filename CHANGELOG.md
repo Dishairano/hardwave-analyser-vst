@@ -1,5 +1,9 @@
 # Hardwave Analyser — Changelog
 
+## v1.0.34-rc1
+
+- Build the Windows WebView2 in the background so the host never waits (#19)
+
 ## v1.0.33-rc1
 
 - **The Analyser uses far less CPU in your DAW.** This is the change from v1.0.32-rc1, which never reached a stable release because its build failed on our side (#15, #17)
