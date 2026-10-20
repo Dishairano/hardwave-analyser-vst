@@ -104,47 +104,51 @@ const PLUGIN_OS: &str = "unknown";
 // WebView2 auto-install (Windows only)
 // ---------------------------------------------------------------------------
 
-/// Cached result of the WebView2 presence check. Spawning reg.exe is slow
-/// (~2-3 s each with AV scanning). We only need to check once per DAW session.
+/// Cached result of the WebView2 presence check: once present, present for the session.
 #[cfg(target_os = "windows")]
 static WEBVIEW2_ENSURED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Is the WebView2 runtime registered under `root`\`path`, value `pv`?
+///
+/// Read in the process. This used to start reg.exe twice, each 2 to 3 s with a virus scanner
+/// looking at it, on the host's UI thread on the first open of a session.
+#[cfg(target_os = "windows")]
+fn webview2_registered(root: windows::Win32::System::Registry::HKEY, path: &str) -> bool {
+    use windows::core::{w, HSTRING};
+    use windows::Win32::System::Registry::{RegGetValueW, RRF_RT_REG_SZ};
+    let mut size = 0u32;
+    // SAFETY: a key path and value name that live for the call; only the size is asked for.
+    let found = unsafe {
+        RegGetValueW(
+            root,
+            &HSTRING::from(path),
+            w!("pv"),
+            RRF_RT_REG_SZ,
+            None,
+            None,
+            Some(&mut size),
+        )
+    };
+    found.is_ok() && size > 2
+}
+
 #[cfg(target_os = "windows")]
 pub(crate) fn ensure_webview2() {
-    // Already confirmed present this session — skip the slow reg.exe checks.
+    use windows::Win32::System::Registry::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+
+    // Already confirmed present this session.
     if WEBVIEW2_ENSURED.load(Ordering::Relaxed) {
         return;
     }
 
     use std::process::Command;
 
-    let installed = Command::new("reg")
-        .args([
-            "query",
-            r"HKLM\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}",
-            "/v", "pv",
-        ])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-
-    if installed {
-        WEBVIEW2_ENSURED.store(true, Ordering::Relaxed);
-        return;
-    }
-
-    let installed_user = Command::new("reg")
-        .args([
-            "query",
-            r"HKCU\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}",
-            "/v",
-            "pv",
-        ])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-
-    if installed_user {
+    const CLIENT: &str = r"Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}";
+    if webview2_registered(
+        HKEY_LOCAL_MACHINE,
+        &format!(r"SOFTWARE\WOW6432Node\{CLIENT}"),
+    ) || webview2_registered(HKEY_CURRENT_USER, &format!(r"Software\{CLIENT}"))
+    {
         WEBVIEW2_ENSURED.store(true, Ordering::Relaxed);
         return;
     }

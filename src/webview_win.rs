@@ -34,6 +34,11 @@ impl Gate {
         self.scripts_left = Some(scripts);
     }
 
+    /// The WebView could not be set up and another is being built: its scripts no longer count.
+    fn webview_lost(&mut self) {
+        self.scripts_left = None;
+    }
+
     fn script_added(&mut self) {
         if let Some(left) = self.scripts_left.as_mut() {
             *left = left.saturating_sub(1);
@@ -169,6 +174,9 @@ mod windows_page {
         gate: RefCell<Gate>,
         hooked: Cell<bool>,
         loaded: Cell<bool>,
+        /// The next navigation is the one this module started, which the navigation filter
+        /// lets through: the offline page is a `data:` page the filter knows nothing about.
+        own_navigation: Cell<bool>,
         opened_at: Instant,
         env: RefCell<Option<ICoreWebView2Environment>>,
         controller: RefCell<Option<ICoreWebView2Controller>>,
@@ -202,6 +210,7 @@ mod windows_page {
             gate: RefCell::new(Gate::default()),
             hooked: Cell::new(false),
             loaded: Cell::new(false),
+            own_navigation: Cell::new(false),
             opened_at: Instant::now(),
             env: RefCell::new(None),
             controller: RefCell::new(None),
@@ -323,6 +332,13 @@ mod windows_page {
             self.gate.try_borrow().map(|g| g.closed).unwrap_or(true)
         }
 
+        /// The host destroyed its window, and ours with it, before dropping the editor. A
+        /// WebView2 that failed then failed for that, not for its data folder.
+        fn window_gone(&self) -> bool {
+            // SAFETY: IsWindow takes any value, including a handle that is gone.
+            unsafe { !IsWindow(self.container.get()).as_bool() || !IsWindow(self.parent).as_bool() }
+        }
+
         /// The window the page goes in, filling the host's window and painted in the background
         /// colour until the page draws.
         fn make_container(&self) -> bool {
@@ -440,6 +456,10 @@ mod windows_page {
             if self.closed() {
                 return;
             }
+            if self.window_gone() {
+                elog!("[{NAME}] page: the window is gone; no WebView2 is started for it");
+                return;
+            }
             let Some(dir) = self.dirs.borrow_mut().pop_front() else {
                 elog!(
                     "[{NAME}] no WebView2 environment could be created; the window will be empty"
@@ -538,7 +558,7 @@ mod windows_page {
                     return;
                 }
             };
-            if self.closed() {
+            if self.closed() || self.window_gone() {
                 // The window closed while the page was being built.
                 // SAFETY: a controller nobody else holds.
                 let _ = unsafe { controller.Close() };
@@ -551,7 +571,20 @@ mod windows_page {
             );
             // SAFETY: a live controller, on its own thread.
             if let Err(e) = unsafe { self.set_up(&controller) } {
-                elog!("[{NAME}] page: setting up the WebView failed: {}", e);
+                // A browser process that died on the way, say. wry's build failed here and the
+                // next folder was tried; a window left blank helps nobody.
+                elog!(
+                    "[{NAME}] WebView creation FAILED in {:?} while setting it up: {}",
+                    dir,
+                    e
+                );
+                // SAFETY: a controller that is ours and no longer used.
+                let _ = unsafe { controller.Close() };
+                self.controller.borrow_mut().take();
+                self.webview.borrow_mut().take();
+                self.env.borrow_mut().take();
+                self.gate.borrow_mut().webview_lost();
+                self.next_environment();
             }
         }
 
@@ -621,6 +654,9 @@ mod windows_page {
                         let (Some(args), Some(page)) = (args, weak.upgrade()) else {
                             return Ok(());
                         };
+                        if page.own_navigation.replace(false) {
+                            return Ok(());
+                        }
                         let mut uri = PWSTR::null();
                         args.Uri(&mut uri)?;
                         let uri = take_pwstr(uri);
@@ -714,6 +750,7 @@ mod windows_page {
             let Some(webview) = self.webview.borrow().clone() else {
                 return;
             };
+            self.own_navigation.set(true);
             // SAFETY: a live WebView, on its own thread.
             let opened = unsafe {
                 if reachable {
@@ -1038,6 +1075,16 @@ mod gate_tests {
         gate.script_added();
         gate.probed(true);
         assert_eq!(gate.take(), None);
+    }
+
+    #[test]
+    fn a_webview_given_up_before_it_opened_waits_for_the_next() {
+        let mut gate = webview_with_scripts(0);
+        gate.webview_lost();
+        gate.probed(true);
+        assert_eq!(gate.take(), None);
+        gate.webview_ready(0);
+        assert_eq!(gate.take(), Some(true));
     }
 
     #[test]
