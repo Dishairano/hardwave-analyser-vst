@@ -2,7 +2,7 @@
 
 ## v1.0.34-rc1
 
-- Build the Windows WebView2 in the background so the host never waits (#19)
+- On Windows, opening the window no longer makes your DAW wait: the window appears at once and the interface follows about a second later. If the interface cannot load, it now tries again instead of staying blank (#19, #21)
 
 ## v1.0.33-rc1
 
