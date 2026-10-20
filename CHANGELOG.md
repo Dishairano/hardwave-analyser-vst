@@ -1,5 +1,9 @@
 # Hardwave Analyser — Changelog
 
+## v1.0.35-rc1
+
+- On Windows, the window reopens reliably right after you close it (#23)
+
 ## v1.0.34-rc1
 
 - On Windows, opening the window no longer makes your DAW wait: the window appears at once and the interface follows about a second later. If the interface cannot load, it now tries again instead of staying blank (#19, #21)
