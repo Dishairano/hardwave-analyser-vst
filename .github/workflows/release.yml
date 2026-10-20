@@ -256,7 +256,11 @@ jobs:
               BETA_MENTION="<@&1472011152887119873> New release candidate to test: ${PLUGIN_NAME} ${VERSION}. Switch the Hardwave Suite to the Beta channel to get it."
               ;;
             *)
-              HOOK="$DISCORD_WEBHOOK_URL"
+              # A stable version gets its one version post from the site's bot (ops release-post.sh)
+              # since October 2026. This webhook is gone and answered 404, which turned every stable
+              # build red although the build and the release had worked.
+              echo "Stable ${VERSION}: the version post comes from the site's bot, not from this workflow"
+              exit 0
               ;;
           esac
           # Read bullets from CHANGELOG.md, scoped to the matching `## <VERSION>`
