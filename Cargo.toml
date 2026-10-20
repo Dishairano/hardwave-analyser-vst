@@ -13,12 +13,11 @@ description = "VST3/CLAP spectrum analyser plugin with embedded webview UI"
 crate-type = ["cdylib"]
 
 [dependencies]
-ureq = { version = "2", default-features = false, features = ["native-tls"] }
-# native-tls's `vendored` feature bundles a static OpenSSL for the Linux
-# build (the self-hosted runner has no libssl-dev and can't sudo-install).
-# On Windows it transparently uses Schannel and on macOS SecureTransport,
-# so the OpenSSL bundle only ships in the Linux artefact.
-native-tls = { version = "0.2", features = ["vendored"] }
+# HTTPS through rustls with the bundled webpki roots, the same setup the other plug-ins use: every
+# agent, including ureq's default one behind `ureq::post`, gets a TLS connector without any code of
+# ours. ureq's `native-tls` feature does not: each agent must be handed a connector, and without one
+# every https:// request fails with "Unknown Scheme".
+ureq = { version = "2", default-features = false, features = ["tls"] }
 nih_plug = { git = "https://github.com/Dishairano/nih-plug-hardwave.git", branch = "main" }
 
 # Webview editor (replaces vizia)
