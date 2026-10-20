@@ -1,5 +1,9 @@
 # Hardwave Analyser — Changelog
 
+## v1.0.34-rc1
+
+- On Windows, opening the window no longer makes your DAW wait: the window appears at once and the interface follows about a second later. If the interface cannot load, it now tries again instead of staying blank (#19, #21)
+
 ## v1.0.33-rc1
 
 - **The Analyser uses far less CPU in your DAW.** This is the change from v1.0.32-rc1, which never reached a stable release because its build failed on our side (#15, #17)
