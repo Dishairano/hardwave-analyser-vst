@@ -6,7 +6,10 @@ on:
   # straight to main or master was never compiled by CI at all, and a break on macOS or Windows
   # could sit in the default branch until somebody happened to open a pull request. That is how
   # LoudLab stopped compiling for macOS and Windows for weeks.
+  # Only the default branch: a branch with a pull request is already built by pull_request, and building
+  # it on push as well ran every job twice on our own runners (21 Oct 2026).
   push:
+    branches: [master]
 
 jobs:
   build:
