@@ -291,9 +291,9 @@ pub struct HardwaveAnalyserEditor {
     editor_size: Arc<Mutex<(u32, u32)>>,
     /// Channel to tell the webview thread to resize.
     resize_tx: Arc<Mutex<Option<crossbeam_channel::Sender<(u32, u32)>>>>,
-    /// Process-unique identifier for this plug-in instance. Used to give
-    /// every instance its own WebView2 user-data folder.
-    #[allow(dead_code)]
+    /// Process-unique identifier for this plug-in instance. Names the last-resort WebView2
+    /// user-data folder, used only when both stable folders are taken (see [`webview2_dirs`]).
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     instance_id: String,
     /// Plugin parameters, including the persisted preset_state field.
     /// Shared with the Plugin struct via Arc so nih-plug's DAW save/load
@@ -312,6 +312,12 @@ pub struct HardwaveAnalyserEditor {
     /// macOS never saw it because the thread only exists on Windows.
     #[cfg(target_os = "windows")]
     webview2_probe: Mutex<Option<thread::JoinHandle<()>>>,
+    /// The removal of leftover per-instance WebView2 folders, when this editor started it. Joined
+    /// in Drop for the same reason as `webview2_probe`; `cleanup_stop` makes it finish early.
+    #[cfg(target_os = "windows")]
+    cleanup: Mutex<Option<thread::JoinHandle<()>>>,
+    #[cfg(target_os = "windows")]
+    cleanup_stop: Arc<AtomicBool>,
 }
 
 impl Drop for HardwaveAnalyserEditor {
@@ -319,6 +325,13 @@ impl Drop for HardwaveAnalyserEditor {
         #[cfg(target_os = "windows")]
         if let Some(handle) = self.webview2_probe.lock().take() {
             let _ = handle.join();
+        }
+        #[cfg(target_os = "windows")]
+        {
+            self.cleanup_stop.store(true, Ordering::Relaxed);
+            if let Some(handle) = self.cleanup.lock().take() {
+                let _ = handle.join();
+            }
         }
     }
 }
@@ -343,8 +356,6 @@ impl HardwaveAnalyserEditor {
         params: Arc<HardwaveAnalyserParams>,
         consumers: Arc<Consumers>,
     ) -> Self {
-        let token = auth::load_token();
-
         // Pre-warm the WebView2 check in the background so it does not block the DAW's UI
         // thread when the user opens the plugin window. The handle is kept and joined in
         // Drop; a detached thread outlives the plug-in and crashes the host.
@@ -357,7 +368,8 @@ impl HardwaveAnalyserEditor {
 
         Self {
             packet_slot,
-            auth_token: Arc::new(Mutex::new(token)),
+            // Read from disk each time a window opens, in `spawn`.
+            auth_token: Arc::new(Mutex::new(None)),
             scale: Arc::new(AtomicU32::new(1.0f32.to_bits())),
             refresh_interval_ms,
             editor_size: Arc::new(Mutex::new((EDITOR_WIDTH, EDITOR_HEIGHT))),
@@ -367,6 +379,10 @@ impl HardwaveAnalyserEditor {
             consumers,
             #[cfg(target_os = "windows")]
             webview2_probe,
+            #[cfg(target_os = "windows")]
+            cleanup: Mutex::new(None),
+            #[cfg(target_os = "windows")]
+            cleanup_stop: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -443,6 +459,190 @@ fn token_log_line(token: Option<&str>) -> &'static str {
     } else {
         "[HardwaveAnalyser] sign-in token: absent, null injected"
     }
+}
+
+/// The part of the initialization script that tells the page it is inside the plug-in: the flag,
+/// the plug-in's version, the sign-in token and `window.__hardwave`, the page's way back to us.
+///
+/// `window.__hardwave.saveToken(token)` and `clearToken()` are how a sign-in or sign-out made in
+/// the window reaches the shared token file, so the Suite and every other plug-in window see it.
+/// Both also update `window.__HARDWAVE_VST_TOKEN` for the page that is open. `save_state` adds
+/// `saveState`, the state path on Linux and macOS; Windows saves state through the packet server.
+///
+/// The version is the crate's own, digits and dots only, so it needs no escaping.
+fn bridge_script(token: Option<&str>, save_state: bool) -> String {
+    let save_state_member = if save_state {
+        "saveState: function(s) {\n        \
+         try { window.ipc.postMessage('saveState:' + s); } catch (e) {}\n    },\n    "
+    } else {
+        ""
+    };
+    format!(
+        r#"window.__HARDWAVE_VST = true;
+window.__HARDWAVE_VST_VERSION = "{version}";
+{token_line}window.__hardwave = {{
+    version: "{version}",
+    os: "{os}",
+    loadState: function() {{
+        return window.__HARDWAVE_PRESET_STATE;
+    }},
+    {save_state_member}saveToken: function(token) {{
+        if (typeof token !== 'string' || token === '') return;
+        window.__HARDWAVE_VST_TOKEN = token;
+        try {{ window.ipc.postMessage('saveToken:' + token); }} catch (e) {{}}
+    }},
+    clearToken: function() {{
+        window.__HARDWAVE_VST_TOKEN = null;
+        try {{ window.ipc.postMessage('clearToken'); }} catch (e) {{}}
+    }}
+}};
+"#,
+        version = env!("CARGO_PKG_VERSION"),
+        os = PLUGIN_OS,
+        token_line = token_script(token),
+    )
+}
+
+/// The sign-in messages from the page, the same on every platform. Returns whether `msg` was one.
+///
+/// `saveToken:<jwt>` writes the shared token file and keeps the token for this window (the
+/// Windows packet server's `/init` hands it out). `clearToken` removes the token this window held
+/// from the shared file; a newer sign-in made elsewhere since stays.
+fn handle_token_message(msg: &str, auth_token: &Mutex<Option<String>>) -> bool {
+    if let Some(token) = msg.strip_prefix("saveToken:") {
+        let token = token.trim();
+        if auth::is_well_formed(token) {
+            auth::save_token(token);
+            *auth_token.lock() = Some(token.to_string());
+        } else {
+            debug_log("saveToken: refused, not a well-formed token");
+        }
+        true
+    } else if msg == "clearToken" {
+        let held = auth_token.lock().take();
+        auth::clear_token(held.as_deref());
+        true
+    } else {
+        false
+    }
+}
+
+// ---------------------------------------------------------------------------
+// WebView2 user-data folders (Windows)
+// ---------------------------------------------------------------------------
+
+/// The plug-in's stable WebView2 user-data folder, under `data_dir/hardwave`.
+const WEBVIEW2_FOLDER: &str = "analyser-webview2";
+/// Where the last-resort per-instance folders go.
+const WEBVIEW2_INSTANCES_FOLDER: &str = "analyser-webview2-instances";
+/// A per-instance folder older than this is left over and removed.
+const LEFTOVER_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+/// At most this many leftover folders are removed per process, so a machine with hundreds of them
+/// clears them over a few sessions rather than in one long burst of disk work.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+const LEFTOVER_MAX_PER_RUN: usize = 50;
+
+/// The WebView2 user-data folders a window tries, in order, under `base` (`data_dir/hardwave`).
+///
+/// Every window of the plug-in opens on the same stable folder, so the page's own storage and
+/// cookies are there the next time, whichever instance opens. Several windows at once share it:
+/// in one process they share one browser, which WebView2 supports. The second folder is for when
+/// the first is taken (a closed window's browser still exiting, or a second copy of the module, as
+/// MPC loads it; see `webview_win`), and keeps its storage between sessions as well. Only a third
+/// window in that situation gets a folder of its own, removed again a day later.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn webview2_dirs(base: &std::path::Path, instance_id: &str) -> Vec<std::path::PathBuf> {
+    vec![
+        base.join(WEBVIEW2_FOLDER),
+        base.join(format!("{WEBVIEW2_FOLDER}-2")),
+        base.join(WEBVIEW2_INSTANCES_FOLDER).join(instance_id),
+    ]
+}
+
+/// When the per-instance folder named `name` was made, and by which process.
+///
+/// The name is a [`unique_instance_id`]: `<pid>-<unix nanos>-<counter>`, with `.removing` after
+/// it when an earlier removal was cut short. Any other name is not ours and gives `None`.
+fn instance_folder_origin(name: &str) -> Option<(u32, std::time::SystemTime)> {
+    let name = name.strip_suffix(".removing").unwrap_or(name);
+    let mut parts = name.split('-');
+    let pid = parts.next()?.parse::<u32>().ok()?;
+    let nanos = parts.next()?.parse::<u128>().ok()?;
+    parts.next()?.parse::<usize>().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    let nanos = u64::try_from(nanos).ok()?;
+    Some((pid, std::time::UNIX_EPOCH + Duration::from_nanos(nanos)))
+}
+
+/// The per-instance folders under `parent` that are left over: made by another process, more
+/// than [`LEFTOVER_AGE`] before `now`. The editors before this one made one per instance and never
+/// removed it.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn leftover_instance_folders(
+    parent: &std::path::Path,
+    now: std::time::SystemTime,
+    own_pid: u32,
+) -> Vec<std::path::PathBuf> {
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+        .filter(|e| {
+            e.file_name()
+                .to_str()
+                .and_then(instance_folder_origin)
+                .is_some_and(|(pid, made)| {
+                    pid != own_pid && now.duration_since(made).is_ok_and(|age| age > LEFTOVER_AGE)
+                })
+        })
+        .map(|e| e.path())
+        .collect()
+}
+
+/// Remove a leftover WebView2 folder, unless a browser still has it open.
+///
+/// It is renamed first. Windows refuses to rename a folder with a file open inside it, so a
+/// folder some other DAW's browser still uses is left whole instead of half deleted.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn remove_leftover_folder(dir: &std::path::Path) -> std::io::Result<()> {
+    let already_renamed = dir.extension().is_some_and(|e| e == "removing");
+    let target = if already_renamed {
+        dir.to_path_buf()
+    } else {
+        let mut name = dir.file_name().unwrap_or_default().to_os_string();
+        name.push(".removing");
+        let target = dir.with_file_name(name);
+        std::fs::rename(dir, &target)?;
+        target
+    };
+    std::fs::remove_dir_all(&target)
+}
+
+/// Remove leftover per-instance WebView2 folders under `base`, at most `max`, stopping when
+/// `stop` is set. Returns how many went.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn remove_leftover_folders(base: &std::path::Path, max: usize, stop: &AtomicBool) -> usize {
+    let now = std::time::SystemTime::now();
+    let own_pid = std::process::id();
+    // The editors before this one put their folders inside the stable folder's name.
+    let leftovers = [WEBVIEW2_FOLDER, WEBVIEW2_INSTANCES_FOLDER]
+        .iter()
+        .flat_map(|folder| leftover_instance_folders(&base.join(folder), now, own_pid));
+    let mut removed = 0;
+    for dir in leftovers.take(max) {
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
+        match remove_leftover_folder(&dir) {
+            Ok(()) => removed += 1,
+            Err(e) => debug_log(&format!("leftover WebView2 folder kept {:?}: {}", dir, e)),
+        }
+    }
+    removed
 }
 
 // ---------------------------------------------------------------------------
@@ -828,6 +1028,10 @@ impl Editor for HardwaveAnalyserEditor {
         #[cfg(target_os = "windows")]
         pin_own_module();
 
+        // The sign-in as it is on disk now: one made in the Suite or in another plug-in window
+        // since this instance was created counts.
+        *self.auth_token.lock() = auth::load_token();
+
         let packet_slot = Arc::clone(&self.packet_slot);
         let running = Arc::new(AtomicBool::new(true));
         let auth_token = Arc::clone(&self.auth_token);
@@ -870,23 +1074,40 @@ impl Editor for HardwaveAnalyserEditor {
             ensure_webview2();
             sw.mark("ensure_webview2()");
 
-            // Per-instance data directory. The earlier slot_a/slot_b approach
-            // failed because slots could overlap; the bare "analyser-webview2"
-            // approach failed because two plug-in instances on different
-            // tracks shared one UserDataFolder and raced inside the WebView2
-            // browser process. Per-instance under analyser-webview2/<id>
-            // ends both failure modes — every instance gets its own browser
-            // child process keyed on a unique folder, and the folder is
-            // stable across editor close/reopen on the SAME instance so we
-            // keep cookies and cache.
-            let data_dir = dirs::data_dir()
+            // One stable folder for every window of the plug-in, so the page's storage survives
+            // from one open to the next; see webview2_dirs for the fallbacks. A folder per
+            // instance used to start every window as a stranger.
+            let hardwave_dir = dirs::data_dir()
                 .unwrap_or_else(std::env::temp_dir)
-                .join("hardwave")
-                .join("analyser-webview2")
-                .join(&self.instance_id);
-            let _ = std::fs::create_dir_all(&data_dir);
-            debug_log(&format!("Using WebView2 data dir: {:?}", data_dir));
-            sw.mark("data dir ready");
+                .join("hardwave");
+            let data_dirs = webview2_dirs(&hardwave_dir, &self.instance_id);
+            debug_log(&format!("WebView2 data dirs: {:?}", data_dirs));
+            sw.mark("data dirs chosen");
+
+            // The per-instance folders earlier builds left behind, removed in the background
+            // once per process. The thread is joined in Drop, never left running.
+            {
+                static CLEANUP_RUNNING: AtomicBool = AtomicBool::new(false);
+                static CLEANUP_DONE: AtomicBool = AtomicBool::new(false);
+                let mut slot = self.cleanup.lock();
+                if slot.is_none()
+                    && !CLEANUP_DONE.load(Ordering::Relaxed)
+                    && CLEANUP_RUNNING
+                        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+                        .is_ok()
+                {
+                    let stop = Arc::clone(&self.cleanup_stop);
+                    let base = hardwave_dir.clone();
+                    *slot = Some(thread::spawn(move || {
+                        let removed = remove_leftover_folders(&base, LEFTOVER_MAX_PER_RUN, &stop);
+                        debug_log(&format!("removed {} leftover WebView2 folder(s)", removed));
+                        if !stop.load(Ordering::Relaxed) {
+                            CLEANUP_DONE.store(true, Ordering::Relaxed);
+                        }
+                        CLEANUP_RUNNING.store(false, Ordering::Release);
+                    }));
+                }
+            }
 
             let ipc_auth_token = Arc::clone(&auth_token);
             let ipc_params = Arc::clone(&self.params);
@@ -902,10 +1123,10 @@ impl Editor for HardwaveAnalyserEditor {
             sw.mark(&format!("packet server bound (port {})", server_port));
 
             let url = self.build_url(Some(server_port));
-            let (token_line, token_log) = {
+            let (bridge, token_log) = {
                 let token = self.auth_token.lock();
                 (
-                    token_script(token.as_deref()),
+                    bridge_script(token.as_deref(), false),
                     token_log_line(token.as_deref()),
                 )
             };
@@ -920,15 +1141,7 @@ impl Editor for HardwaveAnalyserEditor {
                     if (document.body) document.body.style.cssText += ';background:#0a0a0b!important;';
                 }});
 
-                window.__HARDWAVE_VST = true;
-                {token_line}
-                window.__hardwave = {{
-                    version: "{version}",
-                    os: "{os}",
-                    loadState: function() {{
-                        return window.__HARDWAVE_PRESET_STATE;
-                    }}
-                }};
+                {bridge}
                 window.__HARDWAVE_DEBUG_LOG = "";
 
                 // Block right-click, save, print, view-source, devtools
@@ -938,9 +1151,7 @@ impl Editor for HardwaveAnalyserEditor {
                     if (e.key === 'F12') e.preventDefault();
                 }});
                 "#,
-                token_line = token_line,
-                version = env!("CARGO_PKG_VERSION"),
-                os = PLUGIN_OS,
+                bridge = bridge,
             );
 
             sw.mark("init script built");
@@ -952,15 +1163,10 @@ impl Editor for HardwaveAnalyserEditor {
                 let ipc_resize_tx = Arc::clone(&resize_tx);
                 let ipc_context = Arc::clone(&context);
                 move |msg: &str| {
-                    if let Some(token) = msg.strip_prefix("saveToken:") {
-                        let token = token.trim().to_string();
-                        auth::save_token(&token);
-                        *ipc_auth_token.lock() = Some(token);
+                    if handle_token_message(msg, &ipc_auth_token) {
+                        // A sign-in or a sign-out, done.
                     } else if let Some(signed) = msg.strip_prefix("saveSubCache:") {
                         auth::save_sub_cache(signed.trim());
-                    } else if msg == "clearToken" {
-                        auth::clear_token();
-                        *ipc_auth_token.lock() = None;
                     } else if let Some(state) = msg.strip_prefix("saveState:") {
                         // Preset/config state from the webview. Windows
                         // normally saves via POST /state on the packet
@@ -1000,7 +1206,7 @@ impl Editor for HardwaveAnalyserEditor {
                     },
                     url,
                     init_script,
-                    data_dirs: vec![data_dir],
+                    data_dirs,
                     background: (10, 10, 11),
                     browser_args: Some(
                         "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection \
@@ -1041,10 +1247,10 @@ impl Editor for HardwaveAnalyserEditor {
             };
 
             let url = self.build_url(None);
-            let (token_line, token_log) = {
+            let (bridge, token_log) = {
                 let token = self.auth_token.lock();
                 (
-                    token_script(token.as_deref()),
+                    bridge_script(token.as_deref(), true),
                     token_log_line(token.as_deref()),
                 )
             };
@@ -1119,15 +1325,10 @@ impl Editor for HardwaveAnalyserEditor {
                     })
                     .with_ipc_handler(move |req: wry::http::Request<String>| {
                         let msg = req.body().as_str();
-                        if let Some(token) = msg.strip_prefix("saveToken:") {
-                            let token = token.trim().to_string();
-                            auth::save_token(&token);
-                            *ipc_auth_token.lock() = Some(token);
+                        if handle_token_message(msg, &ipc_auth_token) {
+                            // A sign-in or a sign-out, done.
                         } else if let Some(signed) = msg.strip_prefix("saveSubCache:") {
                             auth::save_sub_cache(signed.trim());
-                        } else if msg == "clearToken" {
-                            auth::clear_token();
-                            *ipc_auth_token.lock() = None;
                         } else if let Some(state) = msg.strip_prefix("saveState:") {
                             // Primary state-save path on Linux/macOS (no
                             // packet server here) — mirrors POST /state.
@@ -1159,20 +1360,9 @@ impl Editor for HardwaveAnalyserEditor {
                             if (document.body) document.body.style.cssText += ';background:#0a0a0b!important;';
                         }});
 
-                        window.__HARDWAVE_VST = true;
-                        {token_line}
                         {preset_state_line}
                         {sub_valid_line}
-                        window.__hardwave = {{
-                            version: "{version}",
-                            os: "{os}",
-                            loadState: function() {{
-                                return window.__HARDWAVE_PRESET_STATE;
-                            }},
-                            saveState: function(s) {{
-                                try {{ window.ipc.postMessage('saveState:' + s); }} catch (e) {{}}
-                            }}
-                        }};
+                        {bridge}
                         window.__HARDWAVE_DEBUG_LOG = "";
 
                         // Block right-click, save, print, view-source, devtools
@@ -1182,11 +1372,9 @@ impl Editor for HardwaveAnalyserEditor {
                             if (e.key === 'F12') e.preventDefault();
                         }});
                         "#,
-                        token_line = token_line,
+                        bridge = bridge,
                         preset_state_line = preset_state_line,
                         sub_valid_line = sub_valid_line,
-                        version = env!("CARGO_PKG_VERSION"),
-                        os = PLUGIN_OS,
                     ))
                     .build_as_child(&parent_wrapper);
 
@@ -1530,6 +1718,10 @@ mod token_tests {
             consumers: Consumers::new(),
             #[cfg(target_os = "windows")]
             webview2_probe: Mutex::new(None),
+            #[cfg(target_os = "windows")]
+            cleanup: Mutex::new(None),
+            #[cfg(target_os = "windows")]
+            cleanup_stop: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -1645,5 +1837,180 @@ mod token_tests {
         assert!(injected.contains("injected"), "{injected}");
         assert!(absent.contains("absent"), "{absent}");
         assert!(!injected.contains(token) && !absent.contains(token));
+    }
+
+    /// The page can hand a sign-in back and sign out, on every platform, and knows our version.
+    #[test]
+    fn the_bridge_gives_the_page_save_and_clear_token_and_the_version() {
+        for save_state in [false, true] {
+            let script = bridge_script(Some("a.b.c"), save_state);
+            assert!(script.contains("saveToken: function(token)"), "{script}");
+            assert!(
+                script.contains("window.ipc.postMessage('saveToken:' + token)"),
+                "{script}"
+            );
+            assert!(script.contains("clearToken: function()"), "{script}");
+            assert!(
+                script.contains("window.ipc.postMessage('clearToken')"),
+                "{script}"
+            );
+            assert!(
+                script.contains(&format!(
+                    "window.__HARDWAVE_VST_VERSION = \"{}\";",
+                    env!("CARGO_PKG_VERSION")
+                )),
+                "{script}"
+            );
+            assert!(script.contains("window.__HARDWAVE_VST = true;"), "{script}");
+            assert!(script.contains(&token_script(Some("a.b.c"))), "{script}");
+            assert_eq!(script.contains("saveState: function(s)"), save_state);
+        }
+    }
+
+    /// The bridge's messages are the ones the IPC handler takes.
+    #[test]
+    fn token_messages_are_handled_and_others_are_left_alone() {
+        let held = Mutex::new(Some("old.token.x".to_string()));
+        assert!(!handle_token_message("resize:800,600", &held));
+        assert!(!handle_token_message("saveState:{}", &held));
+        assert_eq!(held.lock().as_deref(), Some("old.token.x"));
+
+        // A message that is not a token is answered, and changes nothing.
+        assert!(handle_token_message("saveToken:not a token", &held));
+        assert_eq!(held.lock().as_deref(), Some("old.token.x"));
+    }
+
+    /// Every window of the plug-in opens on the same folder first, so two windows open at once
+    /// share it (and its sign-in), and each still has somewhere to go when it is taken.
+    #[test]
+    fn two_editors_share_the_stable_webview2_folder() {
+        let base = std::path::Path::new("data").join("hardwave");
+        let first = editor_holding(None);
+        let second = editor_holding(None);
+        let a = webview2_dirs(&base, &first.instance_id);
+        let b = webview2_dirs(&base, &second.instance_id);
+        assert_eq!(a[0], base.join("analyser-webview2"));
+        assert_eq!(a[0], b[0], "both windows open on the stable folder");
+        assert_eq!(a[1], b[1], "and fall back to the same second one");
+        assert_eq!(a[1], base.join("analyser-webview2-2"));
+        assert_ne!(a[2], b[2], "the last resort is each instance's own");
+        assert!(a[2].starts_with(base.join("analyser-webview2-instances")));
+    }
+}
+
+#[cfg(test)]
+mod leftover_tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    const DAY: Duration = Duration::from_secs(24 * 60 * 60);
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "hardwave-analyser-leftover-{name}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch folder");
+        dir
+    }
+
+    /// A per-instance folder name as `unique_instance_id` makes it, for `pid` at `made`.
+    fn instance_name(pid: u32, made: SystemTime) -> String {
+        let nanos = made.duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        format!("{pid}-{nanos}-0")
+    }
+
+    #[test]
+    fn instance_folder_names_are_read_and_others_are_not() {
+        let made = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let name = instance_name(42, made);
+        assert_eq!(instance_folder_origin(&name), Some((42, made)));
+        assert_eq!(
+            instance_folder_origin(&format!("{name}.removing")),
+            Some((42, made))
+        );
+        assert_eq!(
+            instance_folder_origin(&unique_instance_id()).map(|(pid, _)| pid),
+            Some(std::process::id())
+        );
+        for other in [
+            "EBWebView",
+            "analyser-webview2-2",
+            "1-2",
+            "1-2-3-4",
+            "a-b-c",
+            "",
+        ] {
+            assert_eq!(instance_folder_origin(other), None, "{other}");
+        }
+    }
+
+    #[test]
+    fn only_old_folders_of_other_processes_are_leftover() {
+        let dir = scratch("pick");
+        let now = SystemTime::now();
+        let own = std::process::id();
+        let other = own.wrapping_add(1);
+        let old = instance_name(other, now - 2 * DAY);
+        let fresh = instance_name(other, now - Duration::from_secs(60));
+        let ours = instance_name(own, now - 2 * DAY);
+        for name in [&old, &fresh, &ours, &"EBWebView".to_string()] {
+            std::fs::create_dir_all(dir.join(name)).unwrap();
+        }
+        // A file with an instance name is not a folder to remove.
+        std::fs::write(dir.join(instance_name(other, now - 3 * DAY)), "x").unwrap();
+
+        let found = leftover_instance_folders(&dir, now, own);
+        assert_eq!(found, vec![dir.join(&old)]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn leftovers_are_removed_from_both_places_and_nothing_else_is() {
+        let base = scratch("remove");
+        let now = SystemTime::now();
+        let other = std::process::id().wrapping_add(1);
+        let stable = base.join(WEBVIEW2_FOLDER);
+        let instances = base.join(WEBVIEW2_INSTANCES_FOLDER);
+        let in_stable = stable.join(instance_name(other, now - 2 * DAY));
+        let in_instances = instances.join(instance_name(other, now - 3 * DAY));
+        let cut_short = instances.join(format!("{}.removing", instance_name(other, now - 4 * DAY)));
+        let profile = stable.join("EBWebView").join("Default");
+        for d in [&in_stable, &in_instances, &cut_short, &profile] {
+            std::fs::create_dir_all(d.join("inner")).unwrap();
+            std::fs::write(d.join("inner").join("file"), "x").unwrap();
+        }
+
+        let stop = AtomicBool::new(false);
+        assert_eq!(remove_leftover_folders(&base, 10, &stop), 3);
+        assert!(!in_stable.exists() && !in_instances.exists() && !cut_short.exists());
+        assert!(
+            profile.join("inner").join("file").exists(),
+            "the live profile stays"
+        );
+        let left_in_instances = std::fs::read_dir(&instances).unwrap().count();
+        assert_eq!(left_in_instances, 0, "no renamed folder left behind");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn removal_stops_at_the_limit_and_when_told() {
+        let base = scratch("limit");
+        let now = SystemTime::now();
+        let other = std::process::id().wrapping_add(1);
+        for days in 2..5 {
+            std::fs::create_dir_all(
+                base.join(WEBVIEW2_INSTANCES_FOLDER)
+                    .join(instance_name(other, now - days * DAY)),
+            )
+            .unwrap();
+        }
+        let stop = AtomicBool::new(true);
+        assert_eq!(remove_leftover_folders(&base, 10, &stop), 0);
+        stop.store(false, Ordering::Relaxed);
+        assert_eq!(remove_leftover_folders(&base, 2, &stop), 2);
+        assert_eq!(remove_leftover_folders(&base, 2, &stop), 1);
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
