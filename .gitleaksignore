@@ -1,0 +1,9 @@
+# Findings of the secret scan (gitleaks) that are not secrets. Each is
+# pinned by its fingerprint (commit:file:rule:line), so only that one
+# finding in that one commit is skipped, and has its reason above it.
+
+# A made-up token in a test of the editor's sign-in script
+# (the_script_holds_the_token_only_as_a_json_string): header {"alg":"HS256"},
+# payload {"sub":"42"}, and the word "signature" as its signature. It never
+# signed anything. The test now builds it from its parts.
+0c8453f36c0ea5ed4ed0e949f287cfc5c5d28539:src/editor.rs:generic-api-key:1510
