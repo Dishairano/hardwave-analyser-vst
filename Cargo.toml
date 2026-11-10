@@ -7,6 +7,7 @@ version = "1.0.35-rc1"
 edition = "2021"
 authors = ["Hardwave Studios"]
 license = "GPL-3.0-only"
+publish = false
 description = "VST3/CLAP spectrum analyser plugin with embedded webview UI"
 
 [lib]
@@ -27,7 +28,6 @@ wry = { version = "0.46", optional = true }
 tungstenite = { version = "0.21", default-features = false, features = ["handshake"] }
 
 # Serialization
-bincode = "1.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
@@ -53,6 +53,8 @@ ed25519-dalek = { version = "2", default-features = false }
 # Thread CPU clock for the audio-thread benchmark (src/bench.rs)
 [dev-dependencies]
 libc = "0.2"
+# Only to prove the hand-written packet layout matches it; removed next.
+bincode = "1.3"
 
 # GTK for Linux webview event loop
 [target.'cfg(target_os = "linux")'.dependencies]

@@ -570,7 +570,7 @@ mod tests {
             loop {
                 match socket.read().expect("the plug-in keeps sending") {
                     tungstenite::Message::Binary(data) => {
-                        let packet: protocol::AudioPacket = bincode::deserialize(&data).unwrap();
+                        let packet = protocol::AudioPacket::from_bytes(&data).unwrap();
                         if packet.packet_type == PACKET_TYPE_FFT {
                             return packet;
                         }

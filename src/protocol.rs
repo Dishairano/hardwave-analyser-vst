@@ -60,8 +60,8 @@ pub struct AudioPacket {
     pub right_wave: Vec<f32>,
 
     /// Left channel true peak in dBTP (4× oversampled).
-    /// Appended fields: bincode's `deserialize` allows trailing bytes, so
-    /// older consumers still parse the prefix; JSON consumers ignore extras.
+    /// Appended fields: the binary layout puts them at the end, so older
+    /// consumers still parse the prefix; JSON consumers ignore extras.
     #[serde(default = "default_true_peak")]
     pub left_true_peak: f32,
 
@@ -183,9 +183,118 @@ impl AudioPacket {
         }
     }
 
-    /// Serialize the packet to binary format
+    /// Serialize the packet to binary format.
+    ///
+    /// The layout is bincode 1's default, which is what receivers of these
+    /// packets read: fields in declaration order, integers and floats
+    /// little-endian at their full width, a `bool` as one byte, and a
+    /// `Vec<f32>` as its length (u64) followed by its values. Fields added
+    /// later go at the end, so a receiver that knows fewer fields reads the
+    /// prefix it knows. Written out here so the plug-in does not depend on
+    /// the bincode crate, which is no longer maintained (RUSTSEC-2025-0141).
     pub fn to_bytes(&self) -> Vec<u8> {
-        bincode::serialize(self).unwrap_or_default()
+        let floats = self.left_bins.len()
+            + self.right_bins.len()
+            + self.left_wave.len()
+            + self.right_wave.len();
+        let mut out = Vec::with_capacity(70 + 4 * floats);
+        out.push(self.packet_type);
+        out.extend_from_slice(&self.sample_rate.to_le_bytes());
+        out.extend_from_slice(&self.timestamp_ms.to_le_bytes());
+        put_floats(&mut out, &self.left_bins);
+        put_floats(&mut out, &self.right_bins);
+        for value in [
+            self.left_peak,
+            self.right_peak,
+            self.left_rms,
+            self.right_rms,
+        ] {
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        put_floats(&mut out, &self.left_wave);
+        put_floats(&mut out, &self.right_wave);
+        for value in [
+            self.left_true_peak,
+            self.right_true_peak,
+            self.lufs_momentary,
+            self.lufs_short_term,
+            self.lufs_integrated,
+            self.loudness_range,
+        ] {
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        out.push(u8::from(self.loudness_reset));
+        out.extend_from_slice(&self.loudness_epoch.to_le_bytes());
+        out
+    }
+
+    /// Read a packet written by [`AudioPacket::to_bytes`]. Only tests need
+    /// it: the plug-in sends packets and never reads them.
+    #[cfg(test)]
+    pub(crate) fn from_bytes(data: &[u8]) -> Option<AudioPacket> {
+        let mut r = Reader(data);
+        let packet = AudioPacket {
+            packet_type: r.u8()?,
+            sample_rate: r.u32()?,
+            timestamp_ms: r.u64()?,
+            left_bins: r.floats()?,
+            right_bins: r.floats()?,
+            left_peak: r.f32()?,
+            right_peak: r.f32()?,
+            left_rms: r.f32()?,
+            right_rms: r.f32()?,
+            left_wave: r.floats()?,
+            right_wave: r.floats()?,
+            left_true_peak: r.f32()?,
+            right_true_peak: r.f32()?,
+            lufs_momentary: r.f32()?,
+            lufs_short_term: r.f32()?,
+            lufs_integrated: r.f32()?,
+            loudness_range: r.f32()?,
+            loudness_reset: r.u8()? != 0,
+            loudness_epoch: r.u32()?,
+        };
+        Some(packet)
+    }
+}
+
+fn put_floats(out: &mut Vec<u8>, values: &[f32]) {
+    out.extend_from_slice(&(values.len() as u64).to_le_bytes());
+    for value in values {
+        out.extend_from_slice(&value.to_le_bytes());
+    }
+}
+
+/// Reads the layout [`AudioPacket::to_bytes`] writes, front to back, the
+/// way a receiver does. Trailing bytes it does not ask for are left alone.
+#[cfg(test)]
+pub(crate) struct Reader<'a>(pub(crate) &'a [u8]);
+
+#[cfg(test)]
+impl Reader<'_> {
+    fn take<const N: usize>(&mut self) -> Option<[u8; N]> {
+        let (head, rest) = self.0.split_first_chunk::<N>()?;
+        self.0 = rest;
+        Some(*head)
+    }
+    pub(crate) fn u8(&mut self) -> Option<u8> {
+        self.take::<1>().map(|b| b[0])
+    }
+    pub(crate) fn u32(&mut self) -> Option<u32> {
+        self.take().map(u32::from_le_bytes)
+    }
+    pub(crate) fn u64(&mut self) -> Option<u64> {
+        self.take().map(u64::from_le_bytes)
+    }
+    pub(crate) fn f32(&mut self) -> Option<f32> {
+        self.take().map(f32::from_le_bytes)
+    }
+    pub(crate) fn floats(&mut self) -> Option<Vec<f32>> {
+        let len = usize::try_from(self.u64()?).ok()?;
+        if len > self.0.len() / 4 {
+            return None;
+        }
+        (0..len).map(|_| self.f32()).collect()
     }
 }
 
@@ -193,8 +302,8 @@ impl AudioPacket {
 mod tests {
     use super::*;
 
-    fn from_bytes(data: &[u8]) -> Result<AudioPacket, bincode::Error> {
-        bincode::deserialize(data)
+    fn from_bytes(data: &[u8]) -> Option<AudioPacket> {
+        AudioPacket::from_bytes(data)
     }
 
     #[test]
@@ -225,24 +334,9 @@ mod tests {
     }
 
     /// Old consumers (pre-true-peak struct) must still parse new packets:
-    /// bincode's `deserialize` permits trailing bytes.
+    /// they read the fields they know from the front and leave the rest.
     #[test]
     fn test_backward_compat_trailing_bytes() {
-        #[derive(serde::Deserialize)]
-        struct OldPacket {
-            packet_type: u8,
-            sample_rate: u32,
-            timestamp_ms: u64,
-            left_bins: Vec<f32>,
-            right_bins: Vec<f32>,
-            left_peak: f32,
-            right_peak: f32,
-            left_rms: f32,
-            right_rms: f32,
-            left_wave: Vec<f32>,
-            right_wave: Vec<f32>,
-        }
-
         let packet = AudioPacket::new_fft(
             48000,
             7,
@@ -258,11 +352,19 @@ mod tests {
             -0.4,
         );
         let bytes = packet.to_bytes();
-        let old: OldPacket =
-            bincode::deserialize(&bytes).expect("old struct must tolerate appended fields");
-        assert_eq!(old.packet_type, PACKET_TYPE_FFT);
-        assert_eq!(old.timestamp_ms, 7);
-        assert_eq!(old.right_wave.len(), WAVE_SIZE);
+        let mut old = Reader(&bytes);
+        assert_eq!(old.u8(), Some(PACKET_TYPE_FFT));
+        assert_eq!(old.u32(), Some(48000));
+        assert_eq!(old.u64(), Some(7));
+        assert_eq!(old.floats().map(|v| v.len()), Some(NUM_BINS));
+        assert_eq!(old.floats().map(|v| v.len()), Some(NUM_BINS));
+        for _ in 0..4 {
+            assert!(old.f32().is_some());
+        }
+        assert_eq!(old.floats().map(|v| v.len()), Some(WAVE_SIZE));
+        assert_eq!(old.floats().map(|v| v.len()), Some(WAVE_SIZE));
+        // What an old consumer does not read is the appended fields.
+        assert_eq!(old.0.len(), 4 * 6 + 1 + 4);
     }
 
     fn loudness_packet() -> AudioPacket {
@@ -290,6 +392,14 @@ mod tests {
         })
     }
 
+    /// The hand-written layout is byte for byte what bincode 1.3 wrote.
+    #[test]
+    fn test_bytes_match_bincode() {
+        for packet in [loudness_packet(), AudioPacket::new_heartbeat(44100, 3)] {
+            assert_eq!(packet.to_bytes(), bincode::serialize(&packet).unwrap());
+        }
+    }
+
     #[test]
     fn test_loudness_fields_roundtrip() {
         let decoded = from_bytes(&loudness_packet().to_bytes()).unwrap();
@@ -302,10 +412,11 @@ mod tests {
     }
 
     /// Windows from before the loudness fields still parse the packet, over
-    /// bincode (trailing bytes) and JSON (unknown keys ignored).
+    /// the binary layout (a prefix) and JSON (unknown keys ignored).
     #[test]
     fn test_loudness_fields_are_appended() {
         #[derive(serde::Deserialize)]
+        #[allow(dead_code)]
         struct TruePeakPacket {
             packet_type: u8,
             sample_rate: u32,
@@ -323,15 +434,20 @@ mod tests {
         }
 
         let packet = loudness_packet();
-        let old: TruePeakPacket = bincode::deserialize(&packet.to_bytes()).unwrap();
-        assert_eq!(old.packet_type, PACKET_TYPE_FFT);
-        assert_eq!(old.sample_rate, 48000);
-        assert_eq!(old.timestamp_ms, 9);
-        assert_eq!(old.left_bins.len() + old.right_bins.len(), 2 * NUM_BINS);
-        assert_eq!(old.left_wave.len() + old.right_wave.len(), 2 * WAVE_SIZE);
-        assert_eq!((old.left_peak, old.right_peak), (-3.0, -3.0));
-        assert_eq!((old.left_rms, old.right_rms), (0.5, 0.5));
-        assert_eq!((old.left_true_peak, old.right_true_peak), (-1.0, -1.0));
+        let bytes = packet.to_bytes();
+        let mut old = Reader(&bytes);
+        assert_eq!(old.u8(), Some(PACKET_TYPE_FFT));
+        assert_eq!(old.u32(), Some(48000));
+        assert_eq!(old.u64(), Some(9));
+        let bins = old.floats().unwrap().len() + old.floats().unwrap().len();
+        assert_eq!(bins, 2 * NUM_BINS);
+        assert_eq!((old.f32(), old.f32()), (Some(-3.0), Some(-3.0)));
+        assert_eq!((old.f32(), old.f32()), (Some(0.5), Some(0.5)));
+        let wave = old.floats().unwrap().len() + old.floats().unwrap().len();
+        assert_eq!(wave, 2 * WAVE_SIZE);
+        assert_eq!((old.f32(), old.f32()), (Some(-1.0), Some(-1.0)));
+        // The loudness fields follow, and nothing after them.
+        assert_eq!(old.0.len(), 4 * 4 + 1 + 4);
 
         let json = serde_json::to_string(&packet).unwrap();
         let old: TruePeakPacket = serde_json::from_str(&json).unwrap();
