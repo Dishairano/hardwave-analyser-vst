@@ -41,9 +41,9 @@ concurrency:
 jobs:
   check:
     name: Secure Code Check
-    uses: Dishairano/hardwave-daw/.github/workflows/secure-code-check.yml@2acd9a41afe4910bd03251f6368a2178870f5648 # shared Secure Code Check
+    uses: Dishairano/hardwave-daw/.github/workflows/secure-code-check.yml@f99298ed36b7552a1dbb9ab5b0d86512e4490cf6 # shared Secure Code Check
     with:
-      tools-ref: 2acd9a41afe4910bd03251f6368a2178870f5648
+      tools-ref: f99298ed36b7552a1dbb9ab5b0d86512e4490cf6
       cargo-deny-workspace: true
       semgrep-languages: rust
     secrets:
