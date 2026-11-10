@@ -1,0 +1,31 @@
+# Secure Code Check: what the report says about this product. What the
+# checks cover is set by the inputs in .github/workflows/security.yml and
+# release.yml; the format is described in the DAW repository's
+# scripts/secure-code-check/config.py.
+
+[product]
+id = "hardwave-analyser"
+name = "Hardwave Analyser"
+platforms = "Windows x64, macOS (one file for Apple silicon and Intel), Linux x64"
+repository = "Dishairano/hardwave-analyser-vst"
+
+sbom_target = "all"
+sbom_note = "Rust crates for every platform the plug-in is built for, with every feature on. The build tool (xtask) is checked by cargo deny but not listed here, because it does not ship."
+
+[[sbom]]
+file = "plugin-crates.cdx.json"
+part = "Analyser plug-in: Rust crates"
+cargo = "Cargo.toml"
+output = "hardwave-analyser.cdx.json"
+
+[release]
+test_jobs = ["lint-and-test"]
+tests_tool = "cargo fmt, Clippy, cargo test"
+tests_what = "Formatting; Clippy with warnings as errors; the plug-in's tests, on Linux"
+windows_signing = ""
+files_note = "Built on GitHub-hosted runners; the release itself is put together and published by our own runner. The plug-in files are not code-signed with a Windows certificate or an Apple Developer ID (the macOS bundles are signed ad hoc); this signed report's SHA-256 is how to check that a file is ours."
+
+[not_checked]
+npm_dependencies = "This repository has no npm packages. The editor's page is loaded from hardwavestudios.com and built from another repository, which this report does not cover."
+fuzzing = "No fuzz targets yet. The plug-in reads outside input in one place, the saved state the host hands back; that is the planned first target."
+content_policy = "The editor's page is not part of this repository, so its content policy is not checked here."

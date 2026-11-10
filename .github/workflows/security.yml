@@ -1,0 +1,50 @@
+name: Security
+run-name: Security · ${{ github.ref_name }}
+
+# The security gate: the Secure Code Check every Hardwave product runs,
+# on every push to master, every pull request, and every Monday so a new
+# advisory against something already shipped shows up without waiting
+# for a commit. The release runs the same checks again on its tag and
+# builds nothing until they are green.
+#
+# The checks live in the DAW repository's shared workflow, pinned to one
+# commit (the same commit as tools-ref):
+#
+# - Rust dependencies of the plug-in and its build tool (xtask): known
+#   vulnerabilities, yanked crates, unmaintained crates we depend on
+#   ourselves, licences and download sources, per deny.toml. A
+#   vulnerability fails; there is no warn.
+# - Secrets: gitleaks over the whole history (.gitleaksignore lists the
+#   findings that are not secrets, each with its reason).
+# - Static analysis: Semgrep's free security rules for Rust; a high
+#   finding fails.
+# - An SBOM of what ships.
+#
+# It runs on GitHub's machines with a read-only token and actions pinned
+# to a commit.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  schedule:
+    - cron: '23 5 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Secure Code Check
+    uses: Dishairano/hardwave-daw/.github/workflows/secure-code-check.yml@2acd9a41afe4910bd03251f6368a2178870f5648 # shared Secure Code Check
+    with:
+      tools-ref: 2acd9a41afe4910bd03251f6368a2178870f5648
+      cargo-deny-workspace: true
+      semgrep-languages: rust
+    secrets:
+      SECURE_CODE_CHECK_SIGNING_KEY: ${{ secrets.SECURE_CODE_CHECK_SIGNING_KEY }}

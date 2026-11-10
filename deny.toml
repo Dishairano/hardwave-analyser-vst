@@ -1,0 +1,82 @@
+# What the security gate allows into the plug-in build.
+#
+# Checked by the Secure Code Check (.github/workflows/security.yml) on
+# every push and pull request, every Monday, and again on the release tag
+# before anything is built. A known vulnerability in anything we ship
+# fails; there is no "warn" for those. An exception below needs a reason,
+# and is looked at again whenever the crate that brings it in updates.
+
+[graph]
+all-features = true
+
+[advisories]
+# Vulnerabilities and yanked crates always fail.
+yanked = "deny"
+# Unmaintained crates fail when we depend on them ourselves. Ones that
+# come in under nih-plug, wry or GTK are reported but cannot be replaced
+# from here.
+unmaintained = "workspace"
+# No advisory is ignored. A flaw in something we ship is fixed by moving
+# off it, not by listing it here.
+ignore = []
+
+[licenses]
+# Licences that let us ship the plug-in as it is licensed today.
+allow = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "0BSD",
+    "Unicode-3.0",
+    "CC0-1.0",
+    "MPL-2.0",
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.9
+
+# Our own crates are not published; their licence is ours to set.
+[licenses.private]
+ignore = true
+
+# vst3-sys states its licence as "GPLv3", which is not an SPDX name. Its
+# license.md says GPL version 3 "or (at your option) any later version".
+[[licenses.clarify]]
+crate = "vst3-sys"
+expression = "GPL-3.0-or-later"
+license-files = [{ path = "license.md", hash = 0x8ed76e1b }]
+
+# The one licence exception: vst3-sys, the VST3 interface nih-plug builds
+# the VST3 version of the plug-in with. It is GPL-3.0-or-later. The
+# plug-in's own LICENSE is the GPL version 3, which this is compatible
+# with. Any other GPL crate still fails and needs its own decision.
+[[licenses.exceptions]]
+crate = "vst3-sys"
+allow = ["GPL-3.0-or-later"]
+
+[bans]
+multiple-versions = "allow"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+# Code comes from crates.io, and from these git repositories only, each
+# pinned to one commit in Cargo.lock.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-git = [
+    # Our fork of the plug-in framework (denormal and state-size fixes).
+    "https://github.com/Dishairano/nih-plug-hardwave.git",
+    # Upstream nih-plug, for the parts of it our fork still pulls in.
+    "https://github.com/robbert-vdh/nih-plug.git",
+    # nih-plug's VST3 bindings; not on crates.io in the version it needs.
+    "https://github.com/robbert-vdh/vst3-sys.git",
+    # The CLAP ABI at the revision nih-plug builds against.
+    "https://github.com/micahrj/clap-sys.git",
+    # nih-plug's bundler (xtask) uses it to copy files; a build tool.
+    "https://github.com/nicokoch/reflink.git",
+]
