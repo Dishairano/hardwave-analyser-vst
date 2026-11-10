@@ -392,11 +392,75 @@ mod tests {
         })
     }
 
-    /// The hand-written layout is byte for byte what bincode 1.3 wrote.
+    /// The layout, byte for byte. These bytes are what bincode 1.3 wrote
+    /// for this packet: the hand-written encoder was checked against
+    /// bincode itself on Linux, Windows and macOS before bincode was
+    /// removed, so a receiver sees no difference.
     #[test]
-    fn test_bytes_match_bincode() {
-        for packet in [loudness_packet(), AudioPacket::new_heartbeat(44100, 3)] {
-            assert_eq!(packet.to_bytes(), bincode::serialize(&packet).unwrap());
+    fn test_bytes_are_the_bincode_layout() {
+        let packet = AudioPacket::new_fft(
+            48000,
+            9,
+            vec![-1.0, -2.0],
+            vec![-3.0],
+            -3.0,
+            -3.0,
+            0.5,
+            0.5,
+            vec![0.25],
+            vec![],
+            -1.0,
+            -1.0,
+        )
+        .with_loudness(&LoudnessReading {
+            momentary: -14.5,
+            short_term: -15.25,
+            integrated: -16.0,
+            range: 7.5,
+            reset: true,
+            epoch: 3,
+        });
+        let expected = concat!(
+            "00",               // packet_type
+            "80bb0000",         // sample_rate 48000
+            "0900000000000000", // timestamp_ms 9
+            "0200000000000000",
+            "000080bf",
+            "000000c0", // left_bins
+            "0100000000000000",
+            "000040c0", // right_bins
+            "000040c0",
+            "000040c0", // peaks
+            "0000003f",
+            "0000003f", // rms
+            "0100000000000000",
+            "0000803e",         // left_wave
+            "0000000000000000", // right_wave
+            "000080bf",
+            "000080bf", // true peaks
+            "000068c1",
+            "000074c1",
+            "000080c1", // momentary, short-term, integrated
+            "0000f040", // loudness_range
+            "01",       // loudness_reset
+            "03000000", // loudness_epoch
+        );
+        let hex: String = packet
+            .to_bytes()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert_eq!(hex, expected);
+        let decoded = from_bytes(&packet.to_bytes()).unwrap();
+        assert_eq!(decoded.to_bytes(), packet.to_bytes());
+    }
+
+    /// A truncated packet is refused, not read past its end.
+    #[test]
+    fn test_short_packets_are_refused() {
+        let bytes = loudness_packet().to_bytes();
+        for len in [0, 1, 12, 20, bytes.len() - 1] {
+            assert!(from_bytes(&bytes[..len]).is_none(), "{len} bytes");
         }
     }
 
