@@ -1,5 +1,9 @@
 # Hardwave Analyser — Changelog
 
+## v1.0.36-rc1
+
+- Security: update rustls-webpki and webpki-roots (#26)
+
 ## v1.0.35-rc1
 
 - On Windows, the window reopens reliably right after you close it (#23)
