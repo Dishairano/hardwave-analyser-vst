@@ -1,0 +1,7 @@
+# Secure Code Check signing keys we no longer sign with, one public key per line.
+# Pass this file to ssh-keygen -Y verify with -r and a signature by one of them fails.
+#
+# SHA256:b8cIv1uoJ0oH292J/WpdKgqBJuVmVOXrvSCdXHICpZM, revoked 13 Nov 2026: it leaked from our
+# build system. A report it signed before 13 Nov 2026 counts only if it was published before
+# 10 Nov 2026. See README.md.
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBmE0/eGoq8vVqvuL1UL3OYJ4CYjRNj2Bl38+8ClQpi+ secure-code-check@hardwavestudios.com
