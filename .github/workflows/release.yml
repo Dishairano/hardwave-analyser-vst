@@ -13,6 +13,10 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# Least privilege: jobs that write (the GitHub release) ask for it themselves.
+permissions:
+  contents: read
+
 jobs:
   # The same checks as the Security run, again on the tag itself: a new
   # advisory published since that run still stops this release. Nothing
@@ -64,10 +68,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch, 2026-10-16
         with:
           targets: x86_64-unknown-linux-gnu
 
@@ -89,7 +93,7 @@ jobs:
           tar -czvf hardwave-analyser-linux-x64.tar.gz hardwave-analyser.vst3 hardwave-analyser.clap
 
       - name: Upload
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: hardwave-analyser-linux-x64
           path: target/bundled/hardwave-analyser-linux-x64.tar.gz
@@ -109,10 +113,10 @@ jobs:
         shell: bash
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch, 2026-10-16
         with:
           targets: x86_64-pc-windows-msvc
 
@@ -137,7 +141,7 @@ jobs:
           7z a -tzip hardwave-analyser-windows-x64.zip hardwave-analyser.vst3 hardwave-analyser.clap
 
       - name: Upload
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: hardwave-analyser-windows-x64
           path: target/bundled/hardwave-analyser-windows-x64.zip
@@ -147,10 +151,10 @@ jobs:
     runs-on: macos-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install Rust (both macOS targets)
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch, 2026-10-16
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
 
@@ -180,7 +184,7 @@ jobs:
           zip -r hardwave-analyser-macos-universal.zip hardwave-analyser.vst3 hardwave-analyser.clap
 
       - name: Upload
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: hardwave-analyser-macos-universal
           path: target/bundled/hardwave-analyser-macos-universal.zip
@@ -195,12 +199,12 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: artifacts
 
@@ -217,7 +221,7 @@ jobs:
           fi
 
       - name: Create Release (as pre-release — admin publishes via /dashboard/admin/releases)
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1 (v0.1.15)
         with:
           tag_name: ${{ steps.version.outputs.version }}
           name: Hardwave Analyser ${{ steps.version.outputs.version }}
@@ -243,26 +247,38 @@ jobs:
       # promotes the release to public via /dashboard/admin/releases.
       - name: Sync version to website DB (stable tags only)
         if: ${{ !contains(steps.version.outputs.version, '-') }}
+        env:
+          INTERNAL_SECRET: ${{ secrets.HW_INTERNAL_API_SECRET }}
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          curl -sf -X POST https://hardwavestudios.com/api/internal/sync-version \
-            -H "Content-Type: application/json" \
-            -H "Authorization: Bearer ${{ secrets.INTERNAL_API_SECRET }}" \
-            -d "{\"slug\":\"analyser\",\"version\":\"${{ steps.version.outputs.version }}\"}"
+          # The bearer header goes in on stdin, so the secret is not on curl's command line.
+          printf 'Authorization: Bearer %s\n' "$INTERNAL_SECRET" | \
+            curl -sf -X POST https://hardwavestudios.com/api/internal/sync-version \
+              -H "Content-Type: application/json" \
+              -H @- \
+              -d "{\"slug\":\"analyser\",\"version\":\"${VERSION}\"}"
 
       - name: Update product database (stable tags only)
         if: ${{ !contains(steps.version.outputs.version, '-') }}
         env:
           DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          VERSION="${{ steps.version.outputs.version }}"
           VERSION_NUM="${VERSION#v}"
 
-          mkdir -p ~/.ssh
-          echo "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
-          ssh-keyscan -H 46.225.219.184 >> ~/.ssh/known_hosts 2>/dev/null
-
-          SSH="ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no root@46.225.219.184"
+          # DEPLOY_SSH_KEY has a forced command on 46.225.219.184 (hw-ci-set-version, since
+          # 2026-11-13). The server accepts exactly the remote command below, rebuilds this
+          # statement from slug and version, refuses unless the two match word for word,
+          # refuses pre-release and downgrade versions, and then runs its own copy. Change the
+          # command or the statement and the server refuses the release.
+          # The host key is pinned instead of trusted on first use, and the private key only
+          # lives in this job's temp folder for this step.
+          KEY="$RUNNER_TEMP/deploy_key"
+          KNOWN="$RUNNER_TEMP/deploy_known_hosts"
+          trap 'rm -f "$KEY" "$KNOWN"' EXIT
+          (umask 077 && echo "$DEPLOY_SSH_KEY" > "$KEY")
+          echo "46.225.219.184 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMFzDuknOGOhcjwG+HIaEJvDE53zB+dnVx42gENBLOsm" > "$KNOWN"
+          SSH=(ssh -i "$KEY" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$KNOWN" root@46.225.219.184)
 
           BASE="https://github.com/Dishairano/hardwave-analyser-vst/releases/download/${VERSION}"
           # The database password stays on the server: read it from the site's env there.
@@ -276,10 +292,9 @@ jobs:
             INSERT INTO plugin_versions (slug, version) VALUES ('analyser', '${VERSION}')
               ON DUPLICATE KEY UPDATE version = '${VERSION}';
           "
-          printf '%s\n' "$SQL" | $SSH 'docker exec -i -e MYSQL_PWD="$(grep -m1 "^DATABASE_PASSWORD=" /opt/hardwave/studio/.env.local | cut -d= -f2-)" hardwave-database mysql -u fl_organizer_user fl_organizer_db'
+          printf '%s\n' "$SQL" | "${SSH[@]}" 'docker exec -i -e MYSQL_PWD="$(grep -m1 "^DATABASE_PASSWORD=" /opt/hardwave/studio/.env.local | cut -d= -f2-)" hardwave-database mysql -u fl_organizer_user fl_organizer_db'
 
           echo "Database updated: analyser -> ${VERSION_NUM}"
-          rm -f ~/.ssh/deploy_key
       - name: Post Discord changelog
         if: ${{ env.DISCORD_WEBHOOK_URL != '' }}
         env:
