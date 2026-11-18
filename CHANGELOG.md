@@ -2,10 +2,9 @@
 
 ## v1.0.36-rc1
 
-- Secure Code Check: replace the leaked signing key and revoke the old one (#31)
-- Secure Code Check for the Analyser (#30)
-- Developer seat: remaining changes (#29)
-- Security: update rustls-webpki and webpki-roots (#26)
+- Sign in once, in the Suite or in any Analyser window, and every Analyser window opens signed in (#29)
+- Security update to the code that checks our servers' certificates when the Analyser talks to them (#26)
+- The readings the Analyser sends to the Suite are now written by its own code instead of a library that is no longer maintained; the bytes are the same, so the Suite reads them as before (#30)
 
 ## v1.0.35-rc1
 
