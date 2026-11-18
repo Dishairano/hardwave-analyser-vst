@@ -1,5 +1,12 @@
 # Hardwave Analyser — Changelog
 
+## v1.0.36-rc1
+
+- Secure Code Check: replace the leaked signing key and revoke the old one (#31)
+- Secure Code Check for the Analyser (#30)
+- Developer seat: remaining changes (#29)
+- Security: update rustls-webpki and webpki-roots (#26)
+
 ## v1.0.35-rc1
 
 - On Windows, the window reopens reliably right after you close it (#23)
