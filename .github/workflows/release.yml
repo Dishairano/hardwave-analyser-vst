@@ -193,7 +193,9 @@ jobs:
     needs: [build-linux, build-windows, build-macos]
     outputs:
       tag: ${{ steps.version.outputs.version }}
-    runs-on: [self-hosted, linux, x64]
+    # GitHub-hosted like WettBoi's release job: it only uploads the release, calls the site and
+    # ssh's to .184. The HQ runner it used (hardwave-web01) is gone since 12 Nov 2026; no CI on HQ.
+    runs-on: ubuntu-latest
     permissions:
       contents: write
 
@@ -297,6 +299,9 @@ jobs:
           echo "Database updated: analyser -> ${VERSION_NUM}"
       - name: Post Discord changelog
         if: ${{ env.DISCORD_WEBHOOK_URL != '' }}
+        # The post is a notice, not part of the release. A dead or replaced webhook (the old ones
+        # leaked on 12 Nov 2026) must not fail this job: publish-beta and evidence need it green.
+        continue-on-error: true
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           DISCORD_BETA_WEBHOOK_URL: ${{ secrets.DISCORD_BETA_WEBHOOK_URL }}
